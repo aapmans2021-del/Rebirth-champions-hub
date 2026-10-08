@@ -538,6 +538,27 @@ local function nearestEggName(hrp)
 	return best
 end
 
+-- A Multi dropdown's .Value is a SET ({option = true}), not an array -
+-- Fluent assigns l.Value[option] = true when a row is clicked. So iterate
+-- with pairs, never ipairs, or every selection reads as empty.
+-- An empty set (or only "Any") means no filter.
+local function selectedSet(dropdown)
+	local v = dropdown and dropdown.Value
+	if type(v) ~= "table" then
+		return nil
+	end
+	local set = {}
+	for option, on in pairs(v) do
+		if on and option ~= "Any" then
+			set[tostring(option)] = true
+		end
+	end
+	if next(set) == nil then
+		return nil
+	end
+	return set
+end
+
 local function treeWorldPos(tr)
 	local model = tr and tr:FindFirstChildWhichIsA("Model")
 	if not model then
@@ -566,24 +587,30 @@ local function treeWorldPos(tr)
 	end
 	return model, nil
 end
--- Chop target map. Spawn (mapId 1) always has trees and is where every zone
--- rolls up; Shared.List.Maps gives Spawn id = 1.
+-- Chop's map when no zone filter is set. Spawn (mapId 1) always has trees.
 local CHOP_MAP_ID = 1
 
+-- nearestTree(data, pos, zones)
+-- zones may be nil (any), a Multi-dropdown set ({name=true}), or a plain
+-- table. All three are handled by a single truthiness lookup.
 local function nearestTree(data, pos, zones)
 	local best, bestD = nil, math.huge
 	for _, tr in pairs(CollectionService:GetTagged("Tree")) do
 		if tr:IsDescendantOf(workspace) then
 			local g = tr:GetAttribute("groupId")
 			local tid = tr:GetAttribute("treeId")
-			if g and tid and (next(zones) == nil or zones[g]) then
+			if g and tid and zones[g] then
 				local rec = data.trees[g] and data.trees[g][tid]
 				if rec and (rec.hp or 0) > 0 then
 					-- the tag sits on a Folder, so it has no pivot of its own;
-					-- take the position from the child Model
-					local _, _, pivot = treeWorldPos(tr)
-					if pivot then
-						local d = (pivot - pos).Magnitude
+					-- the position comes from the child Model. treeWorldPos
+					-- returns (model, part, pivot): a normal tree only fills
+					-- the second value, and only the pivot fallback fills the
+					-- third, so the position has to be resolved from either.
+					local model, part, pivot = treeWorldPos(tr)
+					local world = pivot or (part and part.Position)
+					if world then
+						local d = (world - pos).Magnitude
 						if d < bestD then
 							bestD, best = d, tr
 						end
@@ -1713,18 +1740,56 @@ local function chopRunner(t, zones)
 		return
 	end
 
-	-- travel to a map that actually has trees, or every tree is untargetable
+	-- Every tree zone lives on its OWN map (Shared.List.Trees gives each a
+	-- mapId: kingdom=6, volcano=9, steampunk=14, ...). A tree on any other
+	-- map is not loaded, so it has no parts and cannot be chopped - which is
+	-- why Chop used to wander between areas without cutting anything. Work
+	-- out which map the trees we actually want are on, and travel to it.
 	if MapController == nil then
 		MapController = getController("MapController")
 	end
-	if MapController and (t.chopMap or CHOP_MAP_ID) then
-		local wantMap = t.chopMap or CHOP_MAP_ID
+	-- The zone set actually in force for THIS call. axeFarmRunner passes its
+	-- own set (the zones that drop the wood the next axe needs); the Chop
+	-- toggle passes nil so we fall back to the dropdown. The map list has to
+	-- be built from whichever set won, or Farm Materials would travel to the
+	-- map the dropdown names while cutting trees from a different zone.
+	if zones == nil then
+		zones = selectedSet(Options.ChopZones)
+	end
+
+	local wantMaps = {}
+	for zone in pairs(zones) do
+		local def = TreesList[zone]
+		if type(def) == "table" and def.mapId then
+			wantMaps[#wantMaps + 1] = { map = def.mapId, zone = zone }
+		end
+	end
+	table.sort(wantMaps, function(a, b)
+		return a.map < b.map
+	end)
+	if #wantMaps == 0 then
+		wantMaps[1] = { map = CHOP_MAP_ID, zone = nil }
+	end
+
+	if MapController then
+		-- remember which map we last switched to so we rotate rather than
+		-- bouncing between two zones forever
+		if t.chopMapIdx and wantMaps[t.chopMapIdx] then
+			t.chopMapIdx = t.chopMapIdx
+		else
+			t.chopMapIdx = 1
+		end
+		local entry = wantMaps[t.chopMapIdx]
 		local okMap, onMap = pcall(function()
-			return MapController._currentMapId == wantMap
+			return MapController._currentMapId == entry.map
 		end)
 		if okMap and not onMap then
+			-- drop the old anchor: it lives on the map we just left
+			t.tpTree = nil
+			t.tpTreePos = nil
+			t.idleTime = 0
 			pcall(function()
-				MapController:setCurrentMap(wantMap)
+				MapController:setCurrentMap(entry.map)
 			end)
 			return
 		end
@@ -1743,22 +1808,22 @@ local function chopRunner(t, zones)
 	if not hrp then
 		return
 	end
-	zones = zones or (Options.ChopZones and Options.ChopZones.Value) or {}
+	-- zones was resolved to the effective set at the top of this function
 	local tree = nil
 	local cur = t.tpTree
 	if cur and cur:IsDescendantOf(workspace) then
 		local g = cur:GetAttribute("groupId")
 		local tid = cur:GetAttribute("treeId")
 		local rec = g and tid and data.trees[g] and data.trees[g][tid]
-		if rec and (rec.hp or 0) > 0 and (next(zones) == nil or zones[g]) then
+		if rec and (rec.hp or 0) > 0 and zones[g] then
 			tree = cur
 		end
 	end
 	if not tree then
 		tree = nearestTree(data, hrp.Position, zones)
-		if not tree and next(zones) then
-			tree = nearestTree(data, hrp.Position, {})
-		end
+		-- No fallback to "all zones" here. Zones you did not pick are zones you
+		-- did not ask for: falling back to every area is what made Chop wander
+		-- off and target trees you had explicitly excluded.
 	end
 	if not tree then
 		t.idle = (t.idle or 0) + 1
@@ -1767,9 +1832,22 @@ local function chopRunner(t, zones)
 				TreeController:cancelAutoDamageTree()
 			end)
 		end
+		-- this map is cut out: move on to the next zone the player picked
+		-- instead of idling here forever
+		if t.idle >= 3 and MapController and #wantMaps > 1 then
+			t.chopMapIdx = ((t.chopMapIdx or 1) % #wantMaps) + 1
+			t.idle = 0
+			t.idleTime = 0
+			t.tpTree = nil
+			t.tpTreePos = nil
+			pcall(function()
+				MapController:setCurrentMap(wantMaps[t.chopMapIdx].map)
+			end)
+			return
+		end
 		if (t.idleTime or 0) + 30 < os.clock() then
 			t.idleTime = os.clock()
-			notify("Auto Chop", "All trees down - waiting for respawns")
+			notify("Auto Chop", "All trees down here - waiting for respawns")
 		end
 		return
 	end
@@ -1848,27 +1926,90 @@ local function nextAxeName(data)
 	return nil
 end
 
+-- What this should farm, given the account's situation.
+--
+-- The natural "next axe" is nothing when you already hold the top axe (your
+-- sakuraAxe is index 15, the highest in the list). So there are two sensible
+-- targets and we pick the first that applies:
+--   1. the next axe up, from Shared.List.Axes[axe].required, minus what we
+--      already hold - the normal case while you are climbing
+--   2. otherwise fall back to the best axe that is NOT yet owned, which is
+--      what makes this useful on a maxed account: it keeps farming the
+--      materials for the axes you are still missing.
+-- Only items that some tree zone actually drops are considered, so the
+-- runner never aims at a zone that cannot produce the wood.
+local function axeFarmTargets(data)
+	local function collect(name)
+		local def = name and AxesList[name]
+		if type(def) ~= "table" or type(def.required) ~= "table" then
+			return nil
+		end
+		local items, zones = {}, {}
+		for _, req in pairs(def.required) do
+			local rn = req:getName()
+			local have = itemAmount(data, rn)
+			if req:getAmount() > (have or 0) and WOOD_ZONES[rn] then
+				items[rn] = req:getAmount() - (have or 0)
+				for _, z in ipairs(WOOD_ZONES[rn]) do
+					zones[z] = true
+				end
+			end
+		end
+		if next(zones) == nil then
+			return nil
+		end
+		return { name = name, items = items, zones = zones }
+	end
+
+	-- 1) the axe immediately above the one we hold
+	local _, curIdx = currentAxeIndex(data)
+	local nextName
+	for k, v in pairs(ExclusiveDir) do
+		local nm = tostring(k)
+		if v.index == (curIdx or 0) + 1 and nm:lower():find("axe") and not nm:lower():find("pickaxe") then
+			nextName = nm
+		end
+	end
+	local got = collect(nextName)
+	if got then
+		return got
+	end
+
+	-- 2) maxed on upgrades: farm toward the best axe we do not own yet
+	local bestIdx, bestName = -1, nil
+	for k, v in pairs(ExclusiveDir) do
+		local nm = tostring(k)
+		if type(v.index) == "number" and nm:lower():find("axe") and not nm:lower():find("pickaxe") then
+			local owned = false
+			for id, e in pairs(data.inventory and data.inventory.exclusive or {}) do
+				if tostring(e.nm) == nm and (e.am or 0) > 0 then
+					owned = true
+				end
+			end
+			if not owned and v.index > bestIdx then
+				bestIdx, bestName = v.index, nm
+			end
+		end
+	end
+	return collect(bestName)
+end
+
 local function axeFarmRunner(t)
 	local data = getData()
 	if not data or not TreeController then
 		return
 	end
-	local name = nextAxeName(data)
-	local def = name and AxesList[name]
-	if not def or not def.required then
+	local plan = axeFarmTargets(data)
+	if not plan then
 		return
 	end
-	local woodNeeded = {}
-	for _, req in pairs(def.required) do
-		local rn = req:getName()
-		if req:getAmount() - itemAmount(data, rn) > 0 and WOOD_ZONES[rn] then
-			woodNeeded[#woodNeeded + 1] = rn
-		end
+	-- remember the plan so the status line can show what we are after
+	if t.farmTarget ~= plan.name then
+		t.farmTarget = plan.name
 	end
-	if #woodNeeded == 0 then
-		return
-	end
-	chopRunner(t, zonesForItems(woodNeeded))
+	-- chopRunner resolves the map from the zones set it is handed, so the
+	-- material zones drive the travel here too, not the dropdown
+	chopRunner(t, plan.zones)
 end
 
 local function axeUpgradeRunner(t)
@@ -2174,22 +2315,6 @@ end
 -- does l.Value[option] = true when a row is clicked. So iterate with pairs,
 -- never ipairs, or the selection silently reads as empty.
 -- An empty set (or only "Any") means no filter.
-local function selectedSet(dropdown)
-	local v = dropdown and dropdown.Value
-	if type(v) ~= "table" then
-		return nil
-	end
-	local set = {}
-	for option, on in pairs(v) do
-		if on and option ~= "Any" then
-			set[tostring(option)] = true
-		end
-	end
-	if next(set) == nil then
-		return nil
-	end
-	return set
-end
 
 local function mineWanted()
 	return selectedSet(Options.MineOre)
@@ -2594,7 +2719,6 @@ local FISH_SPOT_CFRAME = CFrame.new(
 )
 
 local FishingController = nil
-local MapController = nil
 local fishConns = {}
 
 local function fishSvc()
@@ -3669,6 +3793,3 @@ task.spawn(function()
 	end)
 end)
 end, debug.traceback)
-if not uiOk2 then
-	warn("[RCU] UI BUILD FAILED:\n" .. tostring(uiErr2))
-end
