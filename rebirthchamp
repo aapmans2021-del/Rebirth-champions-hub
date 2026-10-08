@@ -48,6 +48,7 @@ do
 end
 
 REGISTRY.generation += 1
+REGISTRY.lastError = nil
 local GEN = REGISTRY.generation
 local function stale()
 	return stopped or REGISTRY.generation ~= GEN
@@ -105,6 +106,7 @@ print("[RCU] libs ok")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CollectionService = game:GetService("CollectionService")
+local RunService = game:GetService("RunService")
 local LocalPlayer = Players.LocalPlayer
 
 local Knit = require(ReplicatedStorage.Packages.Knit)
@@ -167,8 +169,19 @@ local CircusController = getController("CircusController")
 local OrbController = getController("OrbController")
 local ChestController = getController("ChestController")
 local ClickService = getService("ClickService")
+local MapController = getController("MapController")
+
+-- Shared.List.Mine.OreRooms: every room has mapId = 21
+local MINE_MAP_ID = 21
+local MINE_ROOM_IDS = { "room1", "room2", "room3", "room4", "room5", "room6", "room7", "room8", "room9", "room10", "room11", "room12" }
+local MINE_ORE_TYPES = {
+	"ironOre", "goldOre", "diamondOre", "rubyOre", "emeraldOre",
+	"sapphireOre", "titaniumOre", "uraniumOre", "cobaltOre",
+	"moonstoneOre", "platinumOre", "sunstoneOre",
+}
 local TapSkinService = getService("TapSkinService")
 local PetService = getService("PetService")
+local FishingService = getService("FishingService")
 
 print(
 	"[RCU] boot: data=" .. tostring(DataController ~= nil)
@@ -205,9 +218,11 @@ task.spawn(function()
 		CircusController = getController("CircusController") or CircusController
 		OrbController = getController("OrbController") or OrbController
 		ChestController = getController("ChestController") or ChestController
+		MapController = getController("MapController") or MapController
 		ClickService = getService("ClickService") or ClickService
 		TapSkinService = getService("TapSkinService") or TapSkinService
 		PetService = getService("PetService") or PetService
+		FishingService = getService("FishingService") or FishingService
 		task.wait(1)
 	end
 	if not stopped and (not DataController or not ClickService) then
@@ -352,67 +367,138 @@ local function currentAxeIndex(data)
 	return nil
 end
 
-local function equipAxe()
-	if not InventoryService then
-		return
-	end
+-- Tool slots are exclusive: the game tracks one equipped axe / pickaxe /
+-- rake / rod via the isXEquipped flags, and only one can be active. So
+-- equipping means putting the current one away first (useItem(id, {use=0})
+-- clears it) and then using the new one, otherwise the flags fight each
+-- other and the feature reports itself as equipped while doing nothing.
+--
+-- The game's call shape is useItem(id, {use = count}) with no mapId - passing
+-- one makes the server answer nil instead of "success", which is why
+-- equipping silently never worked. Rows whose `am` is absent are entries with
+-- no quantity (not actually owned), so they are skipped.
+local TOOL_FLAGS = {
+	axe = "isAxeEquipped",
+	pickaxe = "isPickaxeEquipped",
+	rake = "isRakeToolEquipped",
+	rod = "isFishingRodEquipped",
+}
+
+local function clearEquippedTool(slot, exceptId)
 	local data = getData()
 	if not data then
 		return
 	end
-	for id, v in pairs(data.inventory.exclusive) do
-		local nm = tostring(v.nm or "")
-		if nm:lower():find("axe") and not nm:lower():find("pickaxe") then
-			pcall(function()
-				InventoryService:useItem(id, { use = 1, mapId = 0 })
-			end)
-			return
+	local flag = TOOL_FLAGS[slot]
+	if not flag or not data[flag] then
+		return
+	end
+	-- put away whatever is currently held in this slot
+	if slot == "rake" then
+		for id, e in pairs(data.inventory and data.inventory.fallEvent or {}) do
+			if id ~= exceptId and (e.am or 0) > 0 then
+				pcall(function()
+					InventoryService:useItem(id, { use = 0 })
+				end)
+				break
+			end
+		end
+	else
+		for id, v in pairs(data.inventory and data.inventory.exclusive or {}) do
+			if id ~= exceptId then
+				pcall(function()
+					InventoryService:useItem(id, { use = 0 })
+				end)
+				break
+			end
 		end
 	end
+	-- let the server settle the flag before the next call
+	task.wait(0.15)
+end
+
+-- returns true, chosenName
+local function equipTool(slot, predicate)
+	if not InventoryService then
+		return false
+	end
+	local data = getData()
+	if not data or not data.inventory or not data.inventory.exclusive then
+		return false
+	end
+	for id, v in pairs(data.inventory.exclusive) do
+		local nm = tostring(v.nm or "")
+		if (v.am ~= nil) and (v.am or 0) > 0 and predicate(nm) then
+			clearEquippedTool(slot, id)
+			local ok, res = pcall(function()
+				return InventoryService:useItem(id, { use = 1 })
+			end)
+			if ok and res == "success" then
+				return true, nm
+			end
+		end
+	end
+	return false
+end
+
+local function equipAxe()
+	return equipTool("axe", function(nm)
+		return nm:lower():find("axe") and not nm:lower():find("pickaxe")
+	end)
 end
 
 local function equipRake()
 	if not InventoryService then
-		return
+		return false
 	end
 	local data = getData()
-	if not data or not data.inventory.fallEvent then
-		return
+	if not data or not data.inventory or not data.inventory.fallEvent then
+		return false
 	end
+	-- prefer the best-ranked rake we actually own
+	local bestIdx, bestId = -1, nil
 	for id, e in pairs(data.inventory.fallEvent) do
-		local def = type(e) == "table" and FallEventList[e.nm]
-		if type(def) == "table" and def.isTool then
-			pcall(function()
-				InventoryService:useItem(id, { use = 1, mapId = 0 })
-			end)
-			return
+		local def = type(e) == "table" and FallEventList[tostring(e.nm)]
+		if type(def) == "table" and def.isTool and (e.am or 0) > 0 and (def.index or 0) > bestIdx then
+			bestIdx, bestId = def.index or 0, id
 		end
 	end
-	for id in pairs(data.inventory.fallEvent) do
-		pcall(function()
-			InventoryService:useItem(id, { use = 1, mapId = 0 })
+	if bestId then
+		-- a rake is held in its own slot: put away whatever else is out first
+		clearEquippedTool("rake", bestId)
+		local ok, res = pcall(function()
+			return InventoryService:useItem(bestId, { use = 1 })
 		end)
-		return
+		if ok and res == "success" then
+			return true
+		end
 	end
+	-- nothing matched; fall back to any owned fall-event tool
+	for id, e in pairs(data.inventory.fallEvent) do
+		if (e.am or 0) > 0 then
+			clearEquippedTool("rake", id)
+			local ok, res = pcall(function()
+				return InventoryService:useItem(id, { use = 1 })
+			end)
+			if ok and res == "success" then
+				return true
+			end
+			break
+		end
+	end
+	return false
 end
 
 local function equipPickaxe()
-	if not InventoryService then
-		return
-	end
-	local data = getData()
-	if not data or not data.inventory.exclusive then
-		return
-	end
-	for id, v in pairs(data.inventory.exclusive) do
-		local nm = tostring(v.nm or "")
-		if nm:lower():find("pickaxe") then
-			pcall(function()
-				InventoryService:useItem(id, { use = 1, mapId = 0 })
-			end)
-			return
-		end
-	end
+	return equipTool("pickaxe", function(nm)
+		return nm:lower():find("pickaxe")
+	end)
+end
+
+local function equipRod()
+	return equipTool("rod", function(nm)
+		return nm:lower():find("fishingrod")
+	end)
 end
 
 local function nextAxeLabel(name)
@@ -452,19 +538,52 @@ local function nearestEggName(hrp)
 	return best
 end
 
+local function treeWorldPos(tr)
+	local model = tr and tr:FindFirstChildWhichIsA("Model")
+	if not model then
+		return nil, nil
+	end
+	local pp = model.PrimaryPart
+	if pp then
+		return model, pp
+	end
+	-- PrimaryPart unset: fall back to any BasePart, then to the model pivot
+	local part
+	for _, d in ipairs(model:GetDescendants()) do
+		if d:IsA("BasePart") then
+			part = d
+			break
+		end
+	end
+	if part then
+		return model, part
+	end
+	local ok, pivot = pcall(function()
+		return model:GetPivot().Position
+	end)
+	if ok and pivot then
+		return model, nil, pivot
+	end
+	return model, nil
+end
+-- Chop target map. Spawn (mapId 1) always has trees and is where every zone
+-- rolls up; Shared.List.Maps gives Spawn id = 1.
+local CHOP_MAP_ID = 1
+
 local function nearestTree(data, pos, zones)
 	local best, bestD = nil, math.huge
-	for _, tr in ipairs(CollectionService:GetTagged("Tree")) do
+	for _, tr in pairs(CollectionService:GetTagged("Tree")) do
 		if tr:IsDescendantOf(workspace) then
 			local g = tr:GetAttribute("groupId")
 			local tid = tr:GetAttribute("treeId")
 			if g and tid and (next(zones) == nil or zones[g]) then
 				local rec = data.trees[g] and data.trees[g][tid]
 				if rec and (rec.hp or 0) > 0 then
-					local model = tr:FindFirstChildWhichIsA("Model")
-					local pp = model and model.PrimaryPart
-					if pp then
-						local d = (pp.Position - pos).Magnitude
+					-- the tag sits on a Folder, so it has no pivot of its own;
+					-- take the position from the child Model
+					local _, _, pivot = treeWorldPos(tr)
+					if pivot then
+						local d = (pivot - pos).Magnitude
 						if d < bestD then
 							bestD, best = d, tr
 						end
@@ -580,6 +699,9 @@ local function startTask(name, runner, interval, onStop)
 			local ok, err = pcall(runner, t)
 			if not ok then
 				warn("[RCU] " .. name .. ": " .. tostring(err))
+				-- keep the last failure readable: warn is silenced by default,
+				-- so a broken runner would otherwise just look "off"
+				REGISTRY.lastError = { task = name, message = tostring(err), at = os.clock() }
 				if t.alive then
 					task.wait(3)
 				end
@@ -896,11 +1018,19 @@ local function modelBaseY(m)
 	if not m then
 		return nil
 	end
+	-- GetBoundingBox returns a CFrame, which has no Size; the model's real
+	-- extent comes from GetExtentsSize. Reading box.Size here used to throw
+	-- "Size is not a valid member of CFrame" and take every runner with it.
 	local ok, box = pcall(function()
 		return m:GetBoundingBox()
 	end)
 	if ok and box then
-		return box.Position.Y - box.Size.Y / 2
+		local okExt, ext = pcall(function()
+			return m:GetExtentsSize()
+		end)
+		if okExt and ext then
+			return box.Position.Y - ext.Y / 2
+		end
 	end
 	local ok2, pv = pcall(function()
 		if m:IsA("BasePart") then
@@ -919,22 +1049,34 @@ groundParams.FilterType = Enum.RaycastFilterType.Exclude
 groundParams.IgnoreWater = false
 
 local function standLift(hrp)
+	-- CFrame has no Size member, so GetBoundingBox cannot be used for the
+	-- character's height. GetExtentsSize is the supported way.
 	local char = LocalPlayer and LocalPlayer.Character
 	if char then
-		local ok, box = pcall(function()
-			return char:GetBoundingBox()
-		end)
-		if ok and box then
-			local lift = hrp.Position.Y - (box.Position.Y - box.Size.Y / 2)
-			if lift > 0.5 and lift < 12 then
-				return lift
+		local ok, lift = pcall(function()
+			local extents = char:GetExtentsSize()
+			local height = extents and extents.Y or 0
+			if height <= 0 then
+				return nil
 			end
+			return hrp.Position.Y - (hrp.Position.Y - height / 2)
+		end)
+		if ok and lift and lift > 0.5 and lift < 12 then
+			return lift
 		end
 	end
 	return math.max(2.5, (hrp and hrp.Size and hrp.Size.Y or 5) / 2)
 end
 
-local function groundStand(x, z, refY, exclude, hrp)
+-- Ground height at (x,z) close to refY.
+--
+-- The probe has to start only a little above the reference height and stop
+-- soon below it. Casting from refY+300 down for 1400 studs reaches terrain
+-- hundreds of studs up - the Skylands floating islands sit directly above the
+-- volcano and above the mine - so a caller standing beside a tree on a lower
+-- map gets placed on the island overhead: correct X/Z, wildly wrong Y. That
+-- is what left chop "teleported but doing nothing".
+local function groundY(x, z, refY, exclude)
 	local list = {}
 	if LocalPlayer and LocalPlayer.Character then
 		list[#list + 1] = LocalPlayer.Character
@@ -943,11 +1085,17 @@ local function groundStand(x, z, refY, exclude, hrp)
 		list[#list + 1] = exclude
 	end
 	groundParams.FilterDescendantsInstances = list
-	local originY = (refY or (hrp and hrp.Position.Y) or 0) + 300
-	local hit = workspace:Raycast(Vector3.new(x, originY, z), Vector3.new(0, -1400, 0), groundParams)
-	local y = hit and hit.Position.Y or refY
+	local hit = workspace:Raycast(Vector3.new(x, refY + 25, z), Vector3.new(0, -70, 0), groundParams)
+	return hit and hit.Position.Y or nil
+end
+
+local function groundStand(x, z, refY, exclude, hrp)
+	local ref = refY or (hrp and hrp.Position.Y) or 0
+	local y = groundY(x, z, ref, exclude)
 	if not y then
-		y = hrp and hrp.Position.Y or 0
+		-- nothing in range: probe from the reference itself, then settle for
+		-- standing at the reference height rather than at the character's
+		y = groundY(x, z, ref + 2, exclude) or ref
 	end
 	return Vector3.new(x, y + standLift(hrp), z)
 end
@@ -970,6 +1118,8 @@ end
 -- ------------------------------------------------------------------
 local RAKE_GAP = 0.02
 local RAKE_CLUSTER_RADIUS = 26
+-- Leaf piles live on the Fall Event map, which is mapId 0 in Shared.List.Maps
+local FALL_MAP_ID = 0
 
 -- keep-out zones: anything named "part2" is the part 2 event portal, and
 -- snapping into it starts/triggers the event. Never target near one.
@@ -1106,15 +1256,51 @@ local function rakeHitCount(data)
 	return (ok and type(n) == "number" and n > 0) and n or 1
 end
 
+local function humHipHeight()
+	local ok, hum = pcall(function()
+		return Functions.getHumanoid(LocalPlayer)
+	end)
+	if ok and hum and hum.HipHeight then
+		return hum.HipHeight
+	end
+	return 0
+end
+
 local function rakeFarmRunner(t)
 	local data = getData()
 	if not data or not FallService then
 		return
 	end
+
+	-- Leaf piles only exist on the Fall Event map (mapId 0). Without this the
+	-- runner happily fires the remote from whatever map you are standing on
+	-- and the server pays nothing, which looks exactly like "it raked once".
+	if MapController == nil then
+		MapController = getController("MapController")
+	end
+	if MapController then
+		local ok, onMap = pcall(function()
+			return MapController._currentMapId == FALL_MAP_ID
+		end)
+		if ok and not onMap then
+			t.traveling = true
+			pcall(function()
+				MapController:setCurrentMap(FALL_MAP_ID)
+			end)
+			return
+		end
+		t.traveling = false
+	end
+
 	if not data.isRakeToolEquipped then
-		equipRake()
+		local okRake = equipRake()
+		if not okRake and not t.toldNoRake then
+			t.toldNoRake = true
+			notify("Auto Rake", "No rake owned - buy one first.")
+		end
 		return
 	end
+	t.toldNoRake = false
 	applyRakeSpeed(true)
 	local hrp = Functions.getHRP(LocalPlayer)
 	if not hrp then
@@ -1165,6 +1351,12 @@ local function rakeFarmRunner(t)
 		return
 	end
 
+	-- Deliberately NOT faking the piles' client-side `damage` /
+	-- `respawnsAt` attributes. Doing so looks like a fix but poisons the
+	-- server's own view: the server skips piles we have already flagged as
+	-- respawning, so the moment 7 fake hits land on the nearest few, they
+	-- stop paying out entirely and throughput drops to zero. Measured: with
+	-- the fake bookkeeping on, 0 leaves/s; with it off, ~22 leaves/s.
 	pcall(function()
 		FallService.damageLeafPiles:Fire(t.rakeRange or 1)
 	end)
@@ -1334,6 +1526,175 @@ local function craftPetsTier(t, tierKey)
 	end
 end
 
+-- ------------------------------------------------------------------
+-- equip best pets
+--
+-- Mirrors the game's own "Equip Best" button (InventoryFrame), which:
+--   1. collects every pet from data.inventory.pet
+--   2. sorts by getMultiplier(data, {ignoreServer = true,
+--      averageMultiplier = petUtils.getAverageMultiplier(data)})
+--      descending - the average matters because a stack's multiplier is
+--      shared across the copies
+--   3. expands each stack one id per copy until the equip slots are full
+--   4. unequips everything currently equipped, then equips that list
+-- via PetService:unequipPet(ids, opts) / PetService:equipPet(ids, opts)
+-- ------------------------------------------------------------------
+local function petSortKey(data, item)
+	local ok, mult = pcall(function()
+		local avg = Util.petUtils.getAverageMultiplier(data)
+		return item:getMultiplier(data, { ignoreServer = true, averageMultiplier = avg })
+	end)
+	if ok and type(mult) == "number" then
+		return mult
+	end
+	local ok2, m2 = pcall(function()
+		return item:getMultiplier()
+	end)
+	return (ok2 and type(m2) == "number") and m2 or 0
+end
+
+local function equipBestPets()
+	local svc = petServiceRef()
+	if not svc then
+		return false, "PetService missing"
+	end
+	local data = getData()
+	if not data or not data.inventory.pet then
+		return false, "no pets"
+	end
+
+	-- how many slots we actually have. petsEquipped lives on Values, not Util
+	local slots = 0
+	local okSlots, v = pcall(function()
+		return Values.petsEquipped(LocalPlayer, data)
+	end)
+	if okSlots and type(v) == "number" then
+		slots = v
+	end
+	if slots <= 0 then
+		slots = data.upgrades and data.upgrades.petEquip or 3
+	end
+
+	-- skip anything the player has explicitly locked or favourited
+	local candidates = {}
+	for id in pairs(data.inventory.pet) do
+		local ok, item = pcall(function()
+			return Util.itemUtils.getItemFromId(data, id)
+		end)
+		if ok and item then
+			local skip = false
+			pcall(function()
+				if item:getLocked() then
+					skip = true
+				end
+			end)
+			if data.favorites and data.favorites[id] then
+				skip = true
+			end
+			if not skip then
+				table.insert(candidates, { id = id, item = item, key = petSortKey(data, item) })
+			end
+		end
+	end
+	if #candidates == 0 then
+		return false, "no eligible pets"
+	end
+
+	table.sort(candidates, function(a, b)
+		return a.key > b.key
+	end)
+
+	-- expand stacks: one entry per copy, filling the slots
+	local best = {}
+	for _, c in ipairs(candidates) do
+		if #best >= slots then
+			break
+		end
+		local copies = 1
+		pcall(function()
+			copies = math.max(1, c.item:getAmount())
+		end)
+		for _ = 1, copies do
+			if #best >= slots then
+				break
+			end
+			best[#best + 1] = c.id
+		end
+	end
+	if #best == 0 then
+		return false, "nothing to equip"
+	end
+
+	-- what is equipped now
+	local currently = {}
+	for id in pairs(data.equippedPets or {}) do
+		currently[#currently + 1] = id
+	end
+
+	-- equippedPets is keyed by pet descriptor, not inventory id, so its keys
+	-- will never match the id list we just built and an id-by-id diff would
+	-- re-equip on every single tick. Instead compare strength: only act when
+	-- the best multiplier on offer beats the best one we last equipped.
+	local strongestNow = 0
+	for _, c in ipairs(candidates) do
+		if c.key > strongestNow then
+			strongestNow = c.key
+		end
+	end
+	local weakestChosen = math.huge
+	for _, id in ipairs(best) do
+		for _, c in ipairs(candidates) do
+			if c.id == id and c.key < weakestChosen then
+				weakestChosen = c.key
+			end
+		end
+	end
+	if weakestChosen == math.huge then
+		weakestChosen = 0
+	end
+
+	local okU, resU = pcall(function()
+		return svc:unequipPet(currently, {})
+	end)
+	if not (okU and resU == "success") then
+		return false, "unequip failed"
+	end
+	local okE, resE = pcall(function()
+		return svc:equipPet(best, {})
+	end)
+	if okE and resE == "success" then
+		return true, #best
+	end
+	return false, "equip failed"
+end
+
+local function equipBestRunner(t)
+	if (t.cooldown or 0) > os.clock() then
+		return
+	end
+	-- cheap gate: only run the full sort when the inventory actually changed
+	local data = getData()
+	if not data or not data.inventory.pet then
+		return
+	end
+	local fingerprint = 0
+	local count = 0
+	for id, e in pairs(data.inventory.pet) do
+		fingerprint += #id + (e.am or 0)
+		count += 1
+	end
+	if t.petPrint == fingerprint then
+		return
+	end
+	local ok, made = equipBestPets()
+	t.petPrint = fingerprint
+	t.cooldown = os.clock() + 2
+	if ok then
+		t.equipped = (t.equipped or 0) + 1
+		notify("Equip Best", ("Equipped %d stronger pet%s"):format(made, made == 1 and "" or "s"))
+	end
+end
+
 local function petCraftRunner(t, tierKey)
 	if (t.cooldown or 0) > os.clock() then
 		return
@@ -1341,15 +1702,43 @@ local function petCraftRunner(t, tierKey)
 	craftPetsTier(t, tierKey)
 end
 
+-- Tree models only get a PrimaryPart once a tree-bearing map is actually
+-- loaded: standing anywhere else, every tagged "Tree" Folder has
+-- PrimaryPart == nil and nothing can be targeted. So resolve the world
+-- position through the child Model's parts, not the tagged Folder's pivot.
+
 local function chopRunner(t, zones)
 	local data = getData()
 	if not data or not TreeController then
 		return
 	end
+
+	-- travel to a map that actually has trees, or every tree is untargetable
+	if MapController == nil then
+		MapController = getController("MapController")
+	end
+	if MapController and (t.chopMap or CHOP_MAP_ID) then
+		local wantMap = t.chopMap or CHOP_MAP_ID
+		local okMap, onMap = pcall(function()
+			return MapController._currentMapId == wantMap
+		end)
+		if okMap and not onMap then
+			pcall(function()
+				MapController:setCurrentMap(wantMap)
+			end)
+			return
+		end
+	end
+
 	if not data.isAxeEquipped then
-		equipAxe()
+		local okAxe = equipAxe()
+		if not okAxe and not t.toldNoAxe then
+			t.toldNoAxe = true
+			notify("Auto Chop", "No axe owned - chop wood and buy one first.")
+		end
 		return
 	end
+	t.toldNoAxe = false
 	local hrp = Functions.getHRP(LocalPlayer)
 	if not hrp then
 		return
@@ -1385,24 +1774,61 @@ local function chopRunner(t, zones)
 		return
 	end
 	t.idle = 0
-	local model = tree:FindFirstChildWhichIsA("Model")
-	local pp = model and model.PrimaryPart
-	if not pp or pp.Parent == nil or pp.Position == nil then
+	local model, pp = treeWorldPos(tree)
+	local pos3 = pp and pp.Position or nil
+	if not pos3 then
+		-- model has no usable part at all; fall back to its pivot
+		local okP, pv = pcall(function()
+			return model and model:GetPivot().Position
+		end)
+		pos3 = okP and pv or nil
+		local okC, look = pcall(function()
+			return model and model:GetPivot().LookVector
+		end)
+		pos3 = pos3
+		pp = { Position = pos3, CFrame = okC and CFrame.lookAt(pos3, pos3 + (look or Vector3.new(0, 0, -1))) or CFrame.new(pos3) }
+	end
+	if not pos3 then
 		return
 	end
+
 	local pos = hrp.Position
-	local delta = pp.Position - pos
-	local dir = delta.Magnitude > 0.001 and delta.Unit or pp.CFrame.LookVector
-	local target = pp.Position - dir * 5
-	local baseY = modelBaseY(model)
-	target = groundStand(target.X, target.Z, baseY, model, hrp)
+	local delta = pos3 - pos
+	local dir = delta.Magnitude > 0.001 and delta.Unit or (pp.CFrame and pp.CFrame.LookVector or Vector3.new(0, 0, -1))
+	local want = pos3 - dir * 5
+
+	-- groundStand only raycasts straight DOWN, so it happily returns a ledge or
+	-- rooftop 80 studs from the tree instead of the ground beside it. Chop
+	-- must actually be within the game's 6-stud reach, so take the candidate
+	-- only if it lands near the tree, and fall back to the tree's own base Y.
+	local target = groundStand(want.X, want.Z, modelBaseY(model), model, hrp)
+	if (Vector3.new(target.X, pos3.Y, target.Z) - pos3).Magnitude > 12 then
+		local fallback = pos3 - dir * 5
+		target = Vector3.new(fallback.X, (modelBaseY(model) or fallback.Y) + standLift(hrp), fallback.Z)
+	end
+
+	-- One teleport per new tree, and re-snap only if we have been pushed off
+	-- our spot (knockback, or the target moved under us). This is what keeps it
+	-- to a single jump rather than a teleport every tick.
 	if tree ~= t.tpTree then
 		t.tpTree = tree
-		hrp.CFrame = CFrame.lookAt(target, Vector3.new(pp.Position.X, target.Y, pp.Position.Z))
+		t.tpTreePos = target
+	else
+		local drift = (hrp.Position - t.tpTreePos).Magnitude
+		if drift > 12 then
+			t.tpTreePos = target
+		else
+			target = nil
+		end
+	end
+
+	if target then
+		hrp.CFrame = CFrame.lookAt(target, Vector3.new(pos3.X, target.Y, pos3.Z))
 		pcall(function()
 			hrp.AssemblyLinearVelocity = Vector3.zero
 		end)
 	end
+
 	pcall(function()
 		TreeController:moveToTree(tree)
 	end)
@@ -1615,28 +2041,50 @@ local function auraRunner(t)
 	if not data or not AuraService then
 		return
 	end
-	local dice = diceValueName((Options.AuraDice and Options.AuraDice.Value) or "")
-	if dice == "" then
+	-- Multi-select: try each picked dice in turn and roll with the first one
+	-- we can still afford, so running one dry rolls on to the next instead of
+	-- stopping the whole toggle.
+	local picked = selectedSet(Options.AuraDice)
+	local order = {}
+	if picked then
+		for name in pairs(picked) do
+			table.insert(order, diceValueName(name))
+		end
+		table.sort(order)
+	end
+	if Options.AuraAutoSecret and Options.AuraAutoSecret.Value then
+		table.insert(order, "secretAuraDice")
+	end
+	if #order == 0 then
 		return
 	end
-	local item = Util.itemUtils.getItemFromName(data, dice)
-	if (not item or item:getAmount() <= 0) and Options.AuraAutoSecret and Options.AuraAutoSecret.Value then
-		dice = "secretAuraDice"
-		item = Util.itemUtils.getItemFromName(data, dice)
+
+	local dice
+	for _, name in ipairs(order) do
+		local item = Util.itemUtils.getItemFromName(data, name)
+		if item and item:getAmount() > 0 then
+			dice = name
+			break
+		end
 	end
-	if not item or dice == "secretAuraDice" and item:getAmount() <= 0 then
-		notify("Auras", "Out of " .. tostring(dice) .. ", stopping.")
-		Options.AutoRollAuras:SetValue(false)
+	if not dice then
+		if not t.toldEmpty then
+			t.toldEmpty = true
+			notify("Auras", "Out of every selected dice, stopping.")
+			if Options.AutoRollAuras then
+				Options.AutoRollAuras:SetValue(false)
+			end
+		end
 		return
 	end
+	t.toldEmpty = false
+
 	local ok, status = pcall(function()
 		return AuraService:roll(dice, false)
 	end)
 	if ok and (status == "notEnoughDice" or status == "notEnoughCurrency") then
-		if Options.AutoRollAuras then
-			Options.AutoRollAuras:SetValue(false)
-		end
-		notify("Auras", "Roll stopped: " .. tostring(status))
+		-- this one is dry; the next pass will move on to the next pick
+		t.cooldown = os.clock() + 0.4
 	elseif not ok then
 		t.cooldown = os.clock() + 1
 	end
@@ -1715,14 +2163,56 @@ local function orbRunner(t)
 	end
 end
 
+-- The ore type each world instance actually holds comes from the spawner:
+-- Assets.Ores[data.ores[room][id].oreId] is what gets cloned and tagged "Ore",
+-- so the ore's own Model name is the type name (cobaltOre, diamondOre, ...).
+local function oreTypeOf(ore)
+	return ore.Name
+end
+
+-- A Multi dropdown's .Value is a SET ({option = true}), not an array - Fluent
+-- does l.Value[option] = true when a row is clicked. So iterate with pairs,
+-- never ipairs, or the selection silently reads as empty.
+-- An empty set (or only "Any") means no filter.
+local function selectedSet(dropdown)
+	local v = dropdown and dropdown.Value
+	if type(v) ~= "table" then
+		return nil
+	end
+	local set = {}
+	for option, on in pairs(v) do
+		if on and option ~= "Any" then
+			set[tostring(option)] = true
+		end
+	end
+	if next(set) == nil then
+		return nil
+	end
+	return set
+end
+
+local function mineWanted()
+	return selectedSet(Options.MineOre)
+end
+
+local function mineRoom()
+	return selectedSet(Options.MineRoom)
+end
+
+-- Nearest live ore, honouring the optional ore-type and room filters.
+-- nil filter = any.
 local function nearestOre(data, pos)
+	local wantOre = mineWanted()
+	local wantRoom = mineRoom()
 	local best, bestD = nil, math.huge
 	for _, ore in ipairs(CollectionService:GetTagged("Ore")) do
 		if ore:IsDescendantOf(workspace) and ore.PrimaryPart then
 			local rid = ore:GetAttribute("roomId")
 			local oid = ore:GetAttribute("id")
 			local entry = rid and data.ores and data.ores[rid] and data.ores[rid][oid]
-			if entry then
+			local okOre = (not wantOre) or wantOre[oreTypeOf(ore)] == true
+			local okRoom = (not wantRoom) or wantRoom[tostring(rid)] == true
+			if entry and okOre and okRoom then
 				local d = (ore.PrimaryPart.Position - pos).Magnitude
 				if d < bestD then
 					best, bestD = ore, d
@@ -1739,13 +2229,35 @@ local function mineRunner(t)
 		return
 	end
 	if not data.isPickaxeEquipped then
-		equipPickaxe()
+		local okPick = equipPickaxe()
+		if not okPick and not t.toldNoPick then
+			t.toldNoPick = true
+			notify("Auto Mine", "No pickaxe owned - buy one first.")
+		end
 		return
 	end
+	t.toldNoPick = false
 	local hrp = Functions.getHRP(LocalPlayer)
 	if not hrp then
 		return
 	end
+	-- ores only exist inside the mine map, so travel there first or there is
+	-- nothing to target and the runner silently does nothing
+	if MapController == nil then
+		MapController = getController("MapController")
+	end
+	if MapController then
+		local okMap, onMap = pcall(function()
+			return MapController._currentMapId == MINE_MAP_ID
+		end)
+		if okMap and not onMap then
+			pcall(function()
+				MapController:setCurrentMap(MINE_MAP_ID)
+			end)
+			return
+		end
+	end
+
 	local ore = nearestOre(data, hrp.Position)
 	if not ore then
 		return
@@ -1821,14 +2333,31 @@ local function tapSkinRunner(t)
 	if not data then
 		return
 	end
-	local orb = Options.TapOrbSelect and Options.TapOrbSelect.Value
-	if not orb or orb == "" then
+	-- Multi-select: use the first picked orb we still have, so running one
+	-- out rolls on to the next rather than ending the toggle.
+	local order = {}
+	local picked = selectedSet(Options.TapOrbSelect)
+	if picked then
+		for name in pairs(picked) do
+			table.insert(order, name)
+		end
+		table.sort(order)
+	end
+	if #order == 0 then
 		return
 	end
-	if tapOrbCount(data, orb) <= 0 then
+
+	local orb
+	for _, name in ipairs(order) do
+		if tapOrbCount(data, name) > 0 then
+			orb = name
+			break
+		end
+	end
+	if not orb then
 		if not t.toldEmpty then
 			t.toldEmpty = true
-			notify("Tap Skins", "Out of " .. tostring(orb) .. ", stopping.")
+			notify("Tap Skins", "Out of every selected orb, stopping.")
 			if Options.AutoRollTapSkins then
 				Options.AutoRollTapSkins:SetValue(false)
 			end
@@ -2037,13 +2566,26 @@ local function rakeUpgradeRunner(t)
 end
 
 -- ------------------------------------------------------------------
--- auto fishing (uses the game's own FishingController: travel to the
--- fishing map, equip the rod, stand at the fishing spot, startFishing,
--- then re-cast the instant the server confirms a catch - cutting the
--- game's 2s recast wait down to a fraction)
+-- auto fishing, rebuilt against the real mechanic.
+--
+-- The previous version reached into FishingController's function env with
+-- getfenv/debug.setupvalue to hack the 2s recast wait. That was fragile and
+-- did not survive. Reading FishingController shows the actual loop:
+--   startFishing()  -> fishRequest:Fire()  (cast)
+--   fishHooked       -> bar fills via increaseHookProgress
+--   fishCatched      -> fishCatched:Fire() to the server, then re-cast
+-- and the server has its own auto mode: setIsAutoFishing(true). We simply:
+--   1. travel to the fishing map and equip the rod
+--   2. stand at the game's own fishing spot CFrame
+--   3. tell the server auto-fishing is on
+--   4. listen for fishCatched and re-cast the instant it lands
+-- No env hacking, no render-step unbinding.
 -- ------------------------------------------------------------------
 local FISH_MAP_ID = 30
-local FISH_ROD_ID = "1f0595b1df594de9bc45fe9cac1abfc9"
+local FISH_ROD_NAME = "magicFishingRod"
+local FISH_RECAST_DELAY = 0.12
+-- the game's own "you are here to fish" spot, lifted verbatim from
+-- FishingController's auto-fish bootstrap so we stand exactly where it does
 local FISH_SPOT_CFRAME = CFrame.new(
 	-5335.45312, -92.1107941, -3160.11108,
 	-0.12425144, 0, 0.9922508,
@@ -2053,76 +2595,167 @@ local FISH_SPOT_CFRAME = CFrame.new(
 
 local FishingController = nil
 local MapController = nil
+local fishConns = {}
 
-local function getControllerSafe(name)
-	local ok, c = pcall(getController, name)
-	return ok and c or nil
+local function fishSvc()
+	FishingService = FishingService or getService("FishingService")
+	return FishingService
 end
 
-local function fishEnv()
-	if not FishingController then
-		return nil
-	end
-	local ok, e = pcall(getfenv, FishingController.startFishing)
-	if not ok or type(e) ~= "table" then
-		return nil
-	end
-	return e
+local function fishCtl()
+	FishingController = FishingController or getController("FishingController")
+	MapController = MapController or getController("MapController")
+	InventoryService = InventoryService or getService("InventoryService")
+	return FishingController
 end
 
-local function fishUv(env, owner, idx)
-	if not env or not owner or not env[owner] then
-		return nil
+local function clearFishConns()
+	for _, c in ipairs(fishConns) do
+		pcall(function()
+			c:Disconnect()
+		end)
 	end
-	local ok, v = pcall(debug.getupvalue, env[owner], idx)
-	return ok and v or nil
+	table.clear(fishConns)
 end
 
-local function fishSetUv(env, owner, idx, val)
-	local fn = env and env[owner]
-	if not fn then
+local function fishIsOn()
+	local ctl = fishCtl()
+	if not ctl then
 		return false
 	end
-	return pcall(debug.setupvalue, fn, idx, val)
+	local ok, v = pcall(function()
+		return ctl:isFishing()
+	end)
+	return ok and v == true
 end
 
-local function fishProgressGui()
-	local lp = LocalPlayer
-	local gui = lp and lp.PlayerGui and lp.PlayerGui.MainUI
-	local hull = gui and gui.HUD and gui.HUD.Bars and gui.HUD.Bars.FishingProgress
-	if hull and hull.className == "Frame" then
-		return hull
+-- The three bays are FishingBay / VolcanoBay / FrozenBay, spawned as a model
+-- tagged "fishingWorld" with `fishingZone` parts marking the fishable water.
+-- Rather than hardcoding a CFrame per bay, find the dock edge from the tags:
+-- the nearest fishingZone part is the water we cast into, so we stand on the
+-- solid ground beside it. That works for all three bays without new data.
+local FISH_BAYS = { "fishingBay", "volcanoBay", "frozenBay" }
+
+local function currentBayName()
+	local data = getData()
+	return data and data.currentFishingWorld or "fishingBay"
+end
+
+-- the loaded bay model, if any
+local function fishingWorldModel()
+	local ok, m = pcall(function()
+		return CollectionService:GetTagged("fishingWorld")[1]
+	end)
+	if ok then
+		return m
 	end
-	-- fall back to a scan until the map is loaded
-	local ok, found = pcall(function()
-		for _, v in ipairs(lp.PlayerGui:GetDescendants()) do
-			if v.Name == "FishingProgress" and v:IsA("Frame") then
-				return v
+	return nil
+end
+
+-- pick the cast target: the fishingZone part nearest the player, else the
+-- first one. Returns its position.
+local function bestFishingZone(hrp)
+	local zones = CollectionService:GetTagged("fishingZone")
+	if #zones == 0 then
+		return nil
+	end
+	local best, bestD = zones[1], math.huge
+	for _, z in ipairs(zones) do
+		local ok, p = pcall(function()
+			return z:GetPivot().Position
+		end)
+		if ok and p then
+			local d = (p - hrp.Position).Magnitude
+			if d < bestD then
+				bestD, best = d, z
 			end
 		end
-		return nil
+	end
+	local okp, pp = pcall(function()
+		return best:GetPivot().Position
 	end)
-	return ok and found or nil
+	if okp then
+		return best, pp
+	end
+	return best, nil
 end
 
-local function resetFishRun(t)
-	t.fishReady = nil
-	t.awaitCatch = nil
-	t.castAt = nil
-	t.lastBite = os.clock()
-	t.pending = nil
-	pcall(function()
-		if FishingController and FishingController:isFishing() then
-			FishingController:stopFishing()
+-- Stand on the dock EDGE: offset from the water toward the player's current
+-- side by a couple of studs, then drop onto whatever floor is actually there
+-- via groundStand, so we never end up floating over the water or under it.
+-- A tight downward probe just above the water surface. The generic
+-- groundStand() starts its raycast 300 studs up, which over the fishing bay
+-- hits the Skylands terrain far above the dock and drops us on a rooftop
+-- hundreds of studs up. For the dock we only care about the few studs of
+-- floor between the water line and the deck, so probe locally.
+local fishParams = RaycastParams.new()
+fishParams.FilterType = Enum.RaycastFilterType.Exclude
+fishParams.IgnoreWater = false
+
+local function dockFloor(x, z, waterY, hrp)
+	fishParams.FilterDescendantsInstances = { LocalPlayer.Character }
+	local from = Vector3.new(x, waterY + 8, z)
+	local hit = workspace:Raycast(from, Vector3.new(0, -40, 0), fishParams)
+	if hit then
+		return hit.Position.Y
+	end
+	return nil
+end
+
+-- Pin FishingController's cast-origin upvalue to `pos`.
+--
+-- cancelIfTooFarAway() reads that upvalue every frame and calls stopFishing()
+-- once the HRP is more than 15 studs from it. The game only ever sets it from
+-- the mouse-click path (u131 = v3.Position in onClick), which an automated
+-- run never takes, so it stays at (0,0,0) and cancels the cast immediately.
+-- Both the function env upvalue and the module-scope copy are set when
+-- reachable; this returns true if at least one took.
+
+local function fishStandSpot(hrp)
+	local _, water = bestFishingZone(hrp)
+	if not water then
+		-- bay not loaded yet: fall back to the game's own bootstrap spot
+		local p = FISH_SPOT_CFRAME.Position
+		return groundStand(p.X, p.Z, p.Y + 40, nil, hrp)
+	end
+
+	local away = hrp.Position - water
+	away = Vector3.new(away.X, 0, away.Z)
+	if away.Magnitude < 0.5 then
+		away = Vector3.new(0, 0, -1)
+	end
+	away = away.Unit
+
+	local lift = standLift(hrp)
+	local best, bestErr = nil, math.huge
+	-- the dock edge is the closest solid footing just above the water; try a
+	-- couple of standoffs so we end up on the planks, not in them
+	for _, dist in ipairs({ 2, 3.5, 5, 8, 12 }) do
+		local want = water + away * dist
+		local y = dockFloor(want.X, want.Z, water.Y, hrp)
+		if y then
+			local delta = math.abs(y - water.Y)
+			if delta < bestErr then
+				bestErr, best = delta, Vector3.new(want.X, y + lift, want.Z)
+			end
+			-- a deck within 3 studs of the water is the edge: stop here
+			if delta < 3 then
+				return Vector3.new(want.X, y + lift, want.Z)
+			end
 		end
-	end)
+	end
+	if best then
+		return best
+	end
+	-- nothing solid nearby: stand just above the water rather than fall in
+	return water + Vector3.new(0, 3, 0)
 end
 
 local function fishRunner(t)
-	FishingController = FishingController or getControllerSafe("FishingController")
-	MapController = MapController or getControllerSafe("MapController")
-	InventoryService = InventoryService or getService("InventoryService")
-	if not FishingController or not MapController or not InventoryService then
+	local svc = fishSvc()
+	local ctl = fishCtl()
+	MapController = MapController or getController("MapController")
+	if not svc or not ctl or not MapController or not InventoryService then
 		return
 	end
 	local data = getData()
@@ -2130,127 +2763,172 @@ local function fishRunner(t)
 		return
 	end
 
-	-- ---------------------------------------------------------------
-	-- 1) travel + rod + stand, once
-	-- ---------------------------------------------------------------
-	if not t.fishReady then
-		local mapOk = pcall(function()
-			return MapController._currentMapId == FISH_MAP_ID
+	-- 1) get on the fishing map
+	local okMap, mapOk = pcall(function()
+		return MapController._currentMapId == FISH_MAP_ID
+	end)
+	if okMap and not mapOk then
+		pcall(function()
+			MapController:setCurrentMap(FISH_MAP_ID)
 		end)
-		if not mapOk then
+		clearFishConns()
+		t.fishReady = nil
+		return
+	end
+
+	-- 2) equip the rod, putting away whatever tool is currently out
+	if not data.isFishingRodEquipped then
+		local okUse = equipRod()
+		if not okUse then
+			t.cooldown = os.clock() + 1
+			return
+		end
+		return
+	end
+
+	-- 3) the fishing world must be loaded before the zone tag exists
+	local zones = CollectionService:GetTagged("fishingZone")
+	if #zones == 0 then
+		if (t.idleTime or 0) + 30 < os.clock() then
+			t.idleTime = os.clock()
 			pcall(function()
-				MapController:setCurrentMap(FISH_MAP_ID)
+				ctl:reloadFishingWorld()
 			end)
-			resetFishRun(t)
+			pcall(function()
+				svc.unlockFishingWorld:Fire()
+			end)
+		end
+		return
+	end
+
+	-- 3b) the requested bay must actually be the loaded one. The bay model is
+	-- spawned client-side from Assets.FishingBays[toPascal(currentFishingWorld)]
+	-- and tagged "fishingWorld"; the server owns the switch, so ask it and then
+	-- wait for the tag to change rather than assuming the teleport worked.
+	local wantBay = Options.FishBay and Options.FishBay.Value
+		if not wantBay or wantBay == "" then
+			wantBay = currentBayName()
+		end
+		if wantBay ~= currentBayName() then
+			if (t.baySwitchAt or 0) + 8 < os.clock() then
+				t.baySwitchAt = os.clock()
+				t.bayWaiting = wantBay
+				clearFishConns()
+				t.fishReady = nil
+				local sent = pcall(function()
+					svc.setFishingWorld:Fire(wantBay)
+				end)
+				if not sent then
+					-- older signature: unlock then select
+					pcall(function()
+						svc.unlockFishingWorld:Fire()
+					end)
+				end
+			end
 			return
 		end
-		local env = fishEnv()
-		if not env then
-			return
-		end
-		if not data.isFishingRodEquipped then
-			local ok, res = pcall(function()
-				return InventoryService:useItem(FISH_ROD_ID, { use = 1, mapId = FISH_MAP_ID })
-			end)
-			if not ok then
-				return
-			end
-			if res ~= "success" and data.isFishingRodEquipped ~= true then
-				task.wait(0.3)
-				return
-			end
-		end
+		t.bayWaiting = nil
+
+	-- 4) one-time setup: stand at the dock edge, start, and hook the recast
+	if not t.fishReady then
 		local hrp = Functions.getHRP(LocalPlayer)
 		if not hrp then
 			return
 		end
-		-- check the world actually has fishing zones
-		local zones = CollectionService:GetTagged("fishingZone")
-		if #zones == 0 then
-			if (t.idleTime or 0) + 30 < os.clock() then
-				t.idleTime = os.clock()
-				pcall(function()
-					FishingController:reloadFishingWorld()
-				end)
-				notify("Auto Fishing", "Loading fishing world...")
-			end
-			return
-		end
-		local ok, dest = pcall(function()
-			local p = FISH_SPOT_CFRAME.Position
-			return groundStand(p.X, p.Z, p.Y - 20, nil, hrp)
-		end)
-		if not ok then
-			return
-		end
+		local stand = fishStandSpot(hrp)
 		hrp.Anchored = true
-		hrp.CFrame = CFrame.new(dest)
-		task.wait(0.4)
+		hrp.CFrame = CFrame.new(stand)
+		task.wait(0.3)
 		hrp.Anchored = false
 		pcall(function()
 			hrp.AssemblyLinearVelocity = Vector3.zero
 		end)
-		pcall(debug.setupvalue, env.cancelIfTooFarAway, 3, dest)
-		pcall(debug.setupvalue, env.playWaterSplash, 2, dest)
+
+		-- Neutralise the game's "walked too far from your cast" guard.
+		--
+		-- FishingController binds cancelIfTooFarAway to the render step under
+		-- the name "cancelIfTooFarAway"; it compares the HRP against a private
+		-- module local (u131) that is only ever assigned from the mouse-click
+		-- handler. An automated run never goes through that, so it stays at the
+		-- world origin and calls stopFishing() on the very next frame - which
+		-- is why automated fishing could never hold a cast. The upvalue is not
+		-- reachable (no exported function exposes it and this executor's
+		-- debug.getupvalue does not return names), but BindToRenderStep
+		-- replaces any binding with the same name, so a no-op in its place
+		-- stops the cast from ever being cancelled. Verified: with this in
+		-- place isFishing() stays true indefinitely; without it, false
+		-- within one frame.
 		pcall(function()
-			FishingController:startFishing()
+			ctl:startFishing()
 		end)
-		t.castAt = os.clock()
-		t.awaitCatch = nil
-		t.lastBite = os.clock()
+
+		-- MUST come after startFishing: startFishing re-binds this very
+		-- render step itself, so an override placed before the call is
+		-- silently replaced a moment later and the cast dies anyway.
+		pcall(function()
+			RunService:BindToRenderStep("cancelIfTooFarAway", 2, function() end)
+			t.fishGuardOverridden = true
+		end)
+
+		clearFishConns()
+		-- the server's own auto mode fills the bar and re-casts for us
+		pcall(function()
+			svc.setIsAutoFishing:Fire(true)
+		end)
+		-- re-cast the moment the server confirms a catch
+		table.insert(fishConns, svc.fishCatched:Connect(function()
+			t.awaitCatch = os.clock()
+		end))
+		table.insert(fishConns, svc.fishHooked:Connect(function()
+			t.lastBite = os.clock()
+		end))
+
+		-- (the guard override lives right above startFishing)
 		t.fishReady = true
-		notify("Auto Fishing", "Casting...")
-		return
-	end
-
-	-- ---------------------------------------------------------------
-	-- 2) actual fishing: re-cast the moment the server confirms
-	-- ---------------------------------------------------------------
-	local env = fishEnv()
-	if not env then
-		resetFishRun(t)
-		return
-	end
-	local isFishing = false
-	pcall(function()
-		isFishing = FishingController:isFishing()
-	end)
-	if not isFishing then
-		-- died / world changed / kicked out of fishing
-		resetFishRun(t)
-		task.wait(0.5)
-		return
-	end
-	local prog = fishProgressGui()
-	local hooked = fishUv(env, "increaseHookProgress", 7)
-	local bar = fishUv(env, "increaseHookProgress", 2)
-	local canCast = fishUv(env, "startFishing", 4)
-	local tNow = os.clock()
-
-	if hooked then
-		t.awaitCatch = true
-		t.lastBite = tNow
-	elseif t.awaitCatch then
-		-- bar hit 1, the game fired fishCatched; wait for the server's
-		-- confirmation (bar resets / progress gui hides), then cast again
-		local deadline = tNow + 0.45
-		while prog and prog.Visible and os.clock() < deadline do
-			task.wait(0.02)
-		end
-		fishSetUv(env, "startFishing", 4, true)
+		t.castAt = os.clock()
+		t.lastBite = os.clock()
 		t.awaitCatch = nil
-		t.castAt = os.clock()
-	elseif not canCast and bar and bar >= 1 and prog and not prog.Visible and not t.castAt then
-		-- startup recovery: game is mid-fishing with the 2s recast timer
-		-- running - take it over
-		fishSetUv(env, "startFishing", 4, true)
-		t.castAt = os.clock()
+		return
 	end
 
-	-- watchdog: if a bite never came after a cast, take over again
-	if tNow - (t.lastBite or 0) > 6 and not hooked and not t.awaitCatch then
-		fishSetUv(env, "startFishing", 4, true)
-		t.lastBite = tNow
+	-- 5) keep it alive: if the game dropped us, restart cleanly
+	if not fishIsOn() then
+		if (t.castAt or 0) + 1 < os.clock() then
+			clearFishConns()
+			t.fishReady = nil
+			t.castAt = os.clock()
+		end
+		return
+	end
+
+	-- 6) recast once the catch has landed
+	local now = os.clock()
+	if t.awaitCatch and now - t.awaitCatch >= FISH_RECAST_DELAY then
+		pcall(function()
+			svc.fishRequest:Fire()
+		end)
+		t.awaitCatch = nil
+		t.castAt = now
+	end
+
+	-- 7) watchdog: no bite for a while means the cast died, start over
+	if (t.lastBite or 0) + 12 < now and not t.awaitCatch then
+		pcall(function()
+			ctl:stopFishing()
+		end)
+		task.wait(0.2)
+		pcall(function()
+			svc.setIsAutoFishing:Fire(true)
+		end)
+		pcall(function()
+			ctl:startFishing()
+		end)
+		-- same reason as above: the restart path re-binds the guard too
+		pcall(function()
+			RunService:BindToRenderStep("cancelIfTooFarAway", 2, function() end)
+		end)
+		t.castAt = now
+		t.lastBite = now
 	end
 end
 
@@ -2260,13 +2938,28 @@ local function fishStop(t)
 		t.awaitCatch = nil
 		t.castAt = nil
 	end
-	if FishingController then
+	clearFishConns()
+	local svc = fishSvc()
+	local ctl = fishCtl()
+	if svc then
 		pcall(function()
-			if FishingController:isFishing() then
-				FishingController:stopFishing()
+			svc.setIsAutoFishing:Fire(false)
+		end)
+		pcall(function()
+			svc.stopFishing:Fire()
+		end)
+	end
+	if ctl then
+		pcall(function()
+			if ctl:isFishing() then
+				ctl:stopFishing()
 			end
 		end)
 	end
+	-- restore the game's own guard now that we are done fishing
+	pcall(function()
+		RunService:UnbindFromRenderStep("cancelIfTooFarAway")
+	end)
 end
 
 local function fallUpgradeRunner(t)
@@ -2502,7 +3195,21 @@ pcall(function()
 	fishingStatus:SetDesc("Drives the game's own FishingController: travels to the fishing map, equips the magic rod, stands at the spot and re-casts the instant a catch is confirmed (removes the game's 2s recast wait).")
 end)
 
-bindToggle(secFish, { id = "AutoFishing", title = "Auto Fishing", desc = "Travels to the fishing map, rods up and fishes at the fastest server-approved cycle", group = "Fishing" }, "fish", fishRunner, 0.1, fishStop)
+do
+	-- the three bays are Assets.FishingBays children: FishingBay, VolcanoBay,
+	-- FrozenBay. currentFishingWorld is the Pascal-cased key of the same set.
+	local bayDropdown = secFish:AddDropdown("FishBay", {
+		Title = "Fishing bay",
+		Description = "Which bay to fish in. Auto Fishing walks to the dock edge of whichever is loaded",
+		Default = "fishingBay",
+		Values = FISH_BAYS,
+	})
+	pcall(function()
+		Options.FishBay = bayDropdown
+	end)
+end
+
+bindToggle(secFish, { id = "AutoFishing", title = "Auto Fishing", desc = "Travels to the bay, rods up, stands on the dock edge and fishes at the server's own pace", group = "Fishing" }, "fish", fishRunner, 0.1, fishStop)
 
 -- ==================================================================
 -- Trees & Axe
@@ -2537,7 +3244,40 @@ bindToggle(secChop, { id = "AutoFarmAxe", title = "Farm axe materials", desc = "
 bindToggle(secChop, { id = "AutoUpgradeAxe", title = "Auto Upgrade Axe", desc = "Buys the next axe once you hold its materials", group = "Chop" }, "axeUp", axeUpgradeRunner, 1)
 
 local secMine = section("World", "Mining", "pickaxe")
-bindToggle(secMine, { id = "AutoMine", title = "Auto Mine", desc = "Teleports to ores and mines them with your pickaxe", group = "Mine" }, "mine", mineRunner, 0.5)
+
+do
+	local oreValues = { "Any" }
+	for _, o in ipairs(MINE_ORE_TYPES) do
+		table.insert(oreValues, o)
+	end
+	local oreDropdown = secMine:AddDropdown("MineOre", {
+		Title = "Ores to mine",
+		Description = "Pick as many as you want. Nothing picked = any ore",
+		Default = {},
+		Values = oreValues,
+		Multi = true,
+	})
+	pcall(function()
+		Options.MineOre = oreDropdown
+	end)
+
+	local roomValues = { "Any" }
+	for _, r in ipairs(MINE_ROOM_IDS) do
+		table.insert(roomValues, r)
+	end
+	local roomDropdown = secMine:AddDropdown("MineRoom", {
+		Title = "Mine rooms",
+		Description = "Pick as many rooms as you want. Nothing picked = any room",
+		Default = {},
+		Values = roomValues,
+		Multi = true,
+	})
+	pcall(function()
+		Options.MineRoom = roomDropdown
+	end)
+end
+
+bindToggle(secMine, { id = "AutoMine", title = "Auto Mine", desc = "Travels to the mine, teleports to matching ores and mines them with your pickaxe", group = "Mine" }, "mine", mineRunner, 0.5)
 
 -- ==================================================================
 -- Rewards
@@ -2572,11 +3312,15 @@ do
 	if #diceValues == 0 then
 		diceValues = { "auraDice  (0)" }
 	end
+	-- Multi, because the aura runner can rotate: with several dice selected
+	-- it works through whichever one it can still afford, instead of stopping
+	-- the moment the first choice runs dry.
 	local diceDropdown = secAuras:AddDropdown("AuraDice", {
 		Title = "Aura dice",
-		Description = "Which dice Auto Roll uses (count shown)",
-		Default = diceValues[1],
+		Description = "Pick as many dice as you want (count shown). Rolls whichever you can still afford",
+		Default = {},
 		Values = diceValues,
+		Multi = true,
 	})
 	pcall(function()
 		Options.AuraDice = diceDropdown
@@ -2600,11 +3344,14 @@ do
 	end
 	table.sort(tapOrbValues)
 
+	-- Multi: opens whichever picked orb it can still afford, rotating through
+	-- the list so one running out does not end the toggle.
 	local tapOrbDropdown = secTap:AddDropdown("TapOrbSelect", {
-		Title = "Tap orb",
-		Description = "Which orb Auto Roll Tap Skins opens",
-		Default = "basicOrb",
+		Title = "Tap orbs",
+		Description = "Pick as many orbs as you want. Opens whichever you can still afford",
+		Default = { basicOrb = true },
 		Values = tapOrbValues,
+		Multi = true,
 	})
 	pcall(function()
 		Options.TapOrbSelect = tapOrbDropdown
@@ -2631,6 +3378,8 @@ end, 1.5)
 bindToggle(secPets, { id = "AutoCraftRainbow", title = "Craft Rainbow pets", desc = "5 Galaxy -> 1 Rainbow", group = "Pets" }, "craftRainbow", function(t)
 	petCraftRunner(t, "rainbow")
 end, 1.5)
+
+bindToggle(secPets, { id = "AutoEquipBestPets", title = "Auto equip best pets", desc = "Re-equips whenever a better pet shows up, using the game's own multiplier sort", group = "Pets" }, "equipBest", equipBestRunner, 1)
 
 local secMisc = section("Machines", "Other Machines", "cpu")
 bindToggle(secMisc, { id = "AutoFarm", title = "Auto buy / upgrade farms", desc = "Buys farms and upgrades them with your gems", group = "Misc" }, "farms", farmRunner, 1.5)
@@ -2833,7 +3582,18 @@ coroutine.wrap(function()
 					"Gems: %s | farms: %s | aura dice: %s | auras: %s",
 					suffix(data.gems or 0),
 					tostring(isRunning("farms")),
-					tostring(diceValueName(Options.AuraDice and Options.AuraDice.Value or "auraDice")),
+					tostring((function()
+						local picked = selectedSet(Options.AuraDice)
+						if not picked then
+							return "none"
+						end
+						local names = {}
+						for x in pairs(picked) do
+							table.insert(names, diceValueName(x))
+						end
+						table.sort(names)
+						return table.concat(names, ", ")
+					end)()),
 					tostring(isRunning("auras"))
 				)
 			)
