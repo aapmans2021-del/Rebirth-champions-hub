@@ -1975,18 +1975,41 @@ local function axeFarmTargets(data)
 		return got
 	end
 
-	-- 2) maxed on upgrades: farm toward the best axe we do not own yet
+	-- 2) maxed on upgrades: farm toward the best axe we do not own yet.
+	-- Ownership has to be read through itemUtils, NOT the raw `am` field: an
+	-- axe you actually hold is stored with no `am` at all (the row's amount is
+	-- implied by getItemFromId returning it), so testing `am > 0` reports every
+	-- axe you own as unowned and the runner then farms a finished axe's wood
+	-- forever. Verified: sakuraAxe had am=nil but getAmount()=1.
+	local function ownsAxe(nm)
+		for id, e in pairs(data.inventory and data.inventory.exclusive or {}) do
+			if tostring(e.nm) == nm then
+				local ok, item = pcall(function()
+					return Util.itemUtils.getItemFromId(data, id)
+				end)
+				if ok and item then
+					local amt
+					pcall(function()
+						amt = item:getAmount()
+					end)
+					if (amt or 0) > 0 then
+						return true
+					end
+				end
+				-- fall back to the raw field when the row cannot be resolved
+				if (e.am or 0) > 0 then
+					return true
+				end
+			end
+		end
+		return false
+	end
+
 	local bestIdx, bestName = -1, nil
 	for k, v in pairs(ExclusiveDir) do
 		local nm = tostring(k)
 		if type(v.index) == "number" and nm:lower():find("axe") and not nm:lower():find("pickaxe") then
-			local owned = false
-			for id, e in pairs(data.inventory and data.inventory.exclusive or {}) do
-				if tostring(e.nm) == nm and (e.am or 0) > 0 then
-					owned = true
-				end
-			end
-			if not owned and v.index > bestIdx then
+			if not ownsAxe(nm) and v.index > bestIdx then
 				bestIdx, bestName = v.index, nm
 			end
 		end
