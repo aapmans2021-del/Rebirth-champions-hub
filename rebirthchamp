@@ -1,0 +1,2914 @@
+local STATE = STATE or {}
+
+local stopped = false
+
+local _realPrint, _realWarn = print, warn
+print = function() end
+warn = function() end
+
+-- ------------------------------------------------------------------
+-- global registry: a new run tears the previous one down completely.
+-- Kept in _G (not a local) so a fresh chunk always finds it, even when
+-- the old chunk was loaded by execute-file instead of live-reload.
+-- ------------------------------------------------------------------
+local REGISTRY = rawget(_G, "__RCU_REGISTRY")
+if type(REGISTRY) ~= "table" then
+	REGISTRY = { generation = 0, tasks = {}, cleanups = {} }
+	rawset(_G, "__RCU_REGISTRY", REGISTRY)
+end
+
+do
+	local prev = rawget(_G, "__RCU_HUB")
+	if type(prev) == "table" and type(prev.stop) == "function" then
+		pcall(prev.stop)
+	end
+end
+
+-- kill anything left registered by an earlier run (its coroutines, its
+-- Fluent window, its task table) before we touch anything ourselves.
+do
+	local stale = {}
+	for name, t in pairs(REGISTRY.tasks) do
+		stale[#stale + 1] = name
+		if type(t) == "table" then
+			t.alive = false
+			if type(t.onStop) == "function" then
+				pcall(t.onStop)
+			end
+		end
+	end
+	for _, fn in pairs(REGISTRY.cleanups) do
+		pcall(fn)
+	end
+	table.clear(REGISTRY.tasks)
+	table.clear(REGISTRY.cleanups)
+	for _, name in ipairs(stale) do
+		REGISTRY.tasks[name] = nil
+	end
+end
+
+REGISTRY.generation += 1
+local GEN = REGISTRY.generation
+local function stale()
+	return stopped or REGISTRY.generation ~= GEN
+end
+
+local function tryLoadFile(path)
+	local ok, src = pcall(readfile, path)
+	if not ok or type(src) ~= "string" or src == "" then
+		return nil
+	end
+	local fn, err = loadstring(src)
+	if not fn then
+		warn("[RCU] loadstring failed (" .. path .. "): " .. tostring(err))
+		return nil
+	end
+	local ok2, res = pcall(fn)
+	if not ok2 then
+		warn("[RCU] chunk failed (" .. path .. "): " .. tostring(res))
+		return nil
+	end
+	return res
+end
+
+local function tryLoad(url)
+	local cached = string.match(url, "Addons/([%w_]+)%.lua") or string.match(url, "/download/([%w_]+%.lua)")
+	if cached then
+		local fromFile = tryLoadFile("fluent/" .. cached)
+		if fromFile ~= nil then
+			return fromFile
+		end
+	end
+	local ok, src = pcall(game.HttpGet, game, url)
+	if not ok then
+		warn("[RCU] HttpGet failed: " .. tostring(src))
+		return nil
+	end
+	local fn, err = loadstring(src)
+	if not fn then
+		warn("[RCU] loadstring failed: " .. tostring(err))
+		return nil
+	end
+	local ok2, res = pcall(fn)
+	if not ok2 then
+		warn("[RCU] chunk failed: " .. tostring(res))
+		return nil
+	end
+	return res
+end
+
+local Fluent = tryLoadFile("fluent/main.lua") or loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
+local SaveManager = tryLoad("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/SaveManager.lua")
+local InterfaceManager = tryLoad("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/InterfaceManager.lua")
+print("[RCU] libs ok")
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local CollectionService = game:GetService("CollectionService")
+local LocalPlayer = Players.LocalPlayer
+
+local Knit = require(ReplicatedStorage.Packages.Knit)
+local Util = require(ReplicatedStorage.Shared.Util)
+local Functions = require(ReplicatedStorage.Shared.Functions)
+local Values = require(ReplicatedStorage.Shared.Values)
+local Variables = require(ReplicatedStorage.Shared.Variables)
+local EggList = require(ReplicatedStorage.Shared.List.Pets.Eggs)
+local Rebirths = require(ReplicatedStorage.Shared.List.Rebirths)
+local UpgradesList = require(ReplicatedStorage.Shared.List.Upgrades)
+local FallRebirths = require(ReplicatedStorage.Shared.List.Fall.FallRebirths)
+local HarvestTree = require(ReplicatedStorage.Shared.List.Fall.HarvestTree)
+local LeavesMachine = require(ReplicatedStorage.Shared.List.Fall.LeavesMachine)
+local RakeUpgrader = require(ReplicatedStorage.Shared.List.Fall.RakeUpgrader)
+local FallEventList = require(ReplicatedStorage.Shared.List.Items.FallEvent)
+local Items = require(ReplicatedStorage.Shared.Items)
+local LocalList = ReplicatedStorage.Shared.List
+local AxesList = require(LocalList.Axes)
+local TreesList = require(LocalList.Trees)
+local AchievementsList = require(LocalList.Achievements)
+local PlaytimeRewards = require(LocalList.PlaytimeRewards)
+local ChestsList = require(LocalList.Chests)
+local FarmsList = require(LocalList.Farms)
+local SkillTreeList = require(LocalList.SkillTree)
+local ExclusiveDir = Items.exclusive:directory()
+
+local function getController(name)
+	local ok, c = pcall(function()
+		return Knit.GetController(name)
+	end)
+	return ok and c or nil
+end
+
+local function getService(name)
+	local ok, s = pcall(function()
+		return Knit.GetService(name)
+	end)
+	return ok and s or nil
+end
+
+local DataController = getController("DataController")
+local EggController = getController("EggController")
+local HatchingController = getController("HatchingController")
+local EggService = getService("EggService")
+local RebirthService = getService("RebirthService")
+local FallService = getService("FallService")
+local FallToolService = getService("FallToolService")
+local UpgradeService = getService("UpgradeService")
+local PlayerService = getService("PlayerService")
+local InventoryService = getService("InventoryService")
+local AxeService = getService("AxeService")
+local RewardService = getService("RewardService")
+local FarmService = getService("FarmService")
+local AuraService = getService("AuraService")
+local SkillTreeService = getService("SkillTreeService")
+local TreeController = getController("TreeController")
+local AuraController = getController("AuraController")
+local OreController = getController("OreController")
+local CircusController = getController("CircusController")
+local OrbController = getController("OrbController")
+local ChestController = getController("ChestController")
+local ClickService = getService("ClickService")
+local TapSkinService = getService("TapSkinService")
+local PetService = getService("PetService")
+
+print(
+	"[RCU] boot: data=" .. tostring(DataController ~= nil)
+		.. " egg=" .. tostring(EggController ~= nil)
+		.. " hatch=" .. tostring(HatchingController ~= nil)
+		.. " eggSvc=" .. tostring(EggService ~= nil)
+		.. " click=" .. tostring(ClickService ~= nil)
+		.. " tree=" .. tostring(TreeController ~= nil)
+)
+
+task.spawn(function()
+	for i = 1, 30 do
+		if stopped or (DataController and EggService and ClickService and TreeController) then
+			break
+		end
+		DataController = getController("DataController") or DataController
+		EggController = getController("EggController") or EggController
+		HatchingController = getController("HatchingController") or HatchingController
+		EggService = getService("EggService") or EggService
+		RebirthService = getService("RebirthService") or RebirthService
+		FallService = getService("FallService") or FallService
+		FallToolService = getService("FallToolService") or FallToolService
+		UpgradeService = getService("UpgradeService") or UpgradeService
+		PlayerService = getService("PlayerService") or PlayerService
+		InventoryService = getService("InventoryService") or InventoryService
+		AxeService = getService("AxeService") or AxeService
+		RewardService = getService("RewardService") or RewardService
+		FarmService = getService("FarmService") or FarmService
+		AuraService = getService("AuraService") or AuraService
+		SkillTreeService = getService("SkillTreeService") or SkillTreeService
+		TreeController = getController("TreeController") or TreeController
+		AuraController = getController("AuraController") or AuraController
+		OreController = getController("OreController") or OreController
+		CircusController = getController("CircusController") or CircusController
+		OrbController = getController("OrbController") or OrbController
+		ChestController = getController("ChestController") or ChestController
+		ClickService = getService("ClickService") or ClickService
+		TapSkinService = getService("TapSkinService") or TapSkinService
+		PetService = getService("PetService") or PetService
+		task.wait(1)
+	end
+	if not stopped and (not DataController or not ClickService) then
+		warn("[RCU] still missing controllers after retry: data=" .. tostring(DataController ~= nil) .. " click=" .. tostring(ClickService ~= nil))
+	end
+end)
+
+local NEAREST_EGG = "~ Closest egg ~"
+
+local reportedNoData = false
+local function getData()
+	if not DataController then
+		return nil
+	end
+	local ok, d = pcall(function()
+		return DataController:getData()
+	end)
+	if ok and d then
+		return d
+	end
+	local ok2, d2 = pcall(function()
+		return DataController.data
+	end)
+	if ok2 and d2 then
+		return d2
+	end
+	if not reportedNoData then
+		reportedNoData = true
+		warn("[RCU] getData() returned nil - runners are waiting on data sync")
+	end
+	return nil
+end
+
+local notifyEnabled = false
+local function notify(title, content)
+	if Fluent.Unloaded or not notifyEnabled then
+		return
+	end
+	pcall(function()
+		Fluent:Notify({
+			Title = title,
+			Content = tostring(content),
+			Duration = 5,
+		})
+	end)
+end
+
+local function suffix(n)
+	if type(n) ~= "number" or n ~= n then
+		return tostring(n or "?")
+	end
+	if n < 0 then
+		return "-" .. suffix(-n)
+	end
+	if n < 1000 then
+		return string.format("%.0f", n)
+	end
+	if n >= 1e20 then
+		return string.format("%.2e", n)
+	end
+	local units = { { 1e15, "Q" }, { 1e12, "T" }, { 1e9, "B" }, { 1e6, "M" }, { 1e3, "K" } }
+	for _, u in ipairs(units) do
+		if n >= u[1] then
+			local v = n / u[1]
+			local s = string.format(v >= 100 and "%.0f" or (v >= 10 and "%.1f" or "%.2f"), v)
+			return (s:gsub("(%.%d)0$", "%1"):gsub("%.0$", "")) .. u[2]
+		end
+	end
+	return string.format("%.0f", n)
+end
+
+local function itemAmount(data, name)
+	if not data then
+		return 0
+	end
+	local ok, item = pcall(function()
+		return Util.itemUtils.getItemFromName(data, name)
+	end)
+	if not ok or not item then
+		return 0
+	end
+	local ok2, amt = pcall(function()
+		return item:getAmount()
+	end)
+	return ok2 and amt or 0
+end
+
+local Options = Fluent.Options
+
+local eggNames = {}
+for name in pairs(EggList) do
+	eggNames[#eggNames + 1] = name
+end
+table.sort(eggNames)
+
+local function eggValueName(label)
+	if not label or label == NEAREST_EGG then
+		return label
+	end
+	local i = string.find(label, "  |  ", 1, true)
+	return i and label:sub(1, i - 1) or label
+end
+
+local function diceValueName(label)
+	if not label then
+		return label
+	end
+	local i = string.find(label, "  (", 1, true)
+	return i and label:sub(1, i - 1) or label
+end
+
+local function rawItemAmount(data, name)
+	if not data then
+		return 0
+	end
+	for _, section in pairs(data.inventory or {}) do
+		if type(section) == "table" then
+			for _, e in pairs(section) do
+				if type(e) == "table" and tostring(e.nm or "") == name then
+					return e.am or 0
+				end
+			end
+		end
+	end
+	return 0
+end
+
+-- ------------------------------------------------------------------
+-- world / equip helpers
+-- ------------------------------------------------------------------
+local function currentAxeIndex(data)
+	if not data or not data.inventory then
+		return nil
+	end
+	for _, v in pairs(data.inventory.exclusive) do
+		local nm = tostring(v.nm or "")
+		if nm:lower():find("axe") and not nm:lower():find("pickaxe") then
+			local def = ExclusiveDir[nm]
+			return nm, def and def.index
+		end
+	end
+	return nil
+end
+
+local function equipAxe()
+	if not InventoryService then
+		return
+	end
+	local data = getData()
+	if not data then
+		return
+	end
+	for id, v in pairs(data.inventory.exclusive) do
+		local nm = tostring(v.nm or "")
+		if nm:lower():find("axe") and not nm:lower():find("pickaxe") then
+			pcall(function()
+				InventoryService:useItem(id, { use = 1, mapId = 0 })
+			end)
+			return
+		end
+	end
+end
+
+local function equipRake()
+	if not InventoryService then
+		return
+	end
+	local data = getData()
+	if not data or not data.inventory.fallEvent then
+		return
+	end
+	for id, e in pairs(data.inventory.fallEvent) do
+		local def = type(e) == "table" and FallEventList[e.nm]
+		if type(def) == "table" and def.isTool then
+			pcall(function()
+				InventoryService:useItem(id, { use = 1, mapId = 0 })
+			end)
+			return
+		end
+	end
+	for id in pairs(data.inventory.fallEvent) do
+		pcall(function()
+			InventoryService:useItem(id, { use = 1, mapId = 0 })
+		end)
+		return
+	end
+end
+
+local function equipPickaxe()
+	if not InventoryService then
+		return
+	end
+	local data = getData()
+	if not data or not data.inventory.exclusive then
+		return
+	end
+	for id, v in pairs(data.inventory.exclusive) do
+		local nm = tostring(v.nm or "")
+		if nm:lower():find("pickaxe") then
+			pcall(function()
+				InventoryService:useItem(id, { use = 1, mapId = 0 })
+			end)
+			return
+		end
+	end
+end
+
+local function nextAxeLabel(name)
+	local ok, s = pcall(function()
+		return Functions.toPascal(name)
+	end)
+	return ok and s or name
+end
+
+local function nearestReadyPile(pos)
+	local best, bestD = nil, math.huge
+	for _, p in ipairs(CollectionService:GetTagged("LeafPile")) do
+		if p:IsDescendantOf(workspace) and not p:GetAttribute("respawnsAt") then
+			local d = (p:GetPivot().Position - pos).Magnitude
+			if d < bestD then
+				bestD, best = d, p
+			end
+		end
+	end
+	return best, bestD
+end
+
+local function nearestEggName(hrp)
+	local pos = hrp.Position
+	local best, bestD = nil, math.huge
+	for _, name in ipairs(eggNames) do
+		local ok, model = pcall(function()
+			return EggController:getEggModel(name)
+		end)
+		if ok and model and model.Parent then
+			local d = (model:GetPivot().Position - pos).Magnitude
+			if d < bestD then
+				bestD, best = d, name
+			end
+		end
+	end
+	return best
+end
+
+local function nearestTree(data, pos, zones)
+	local best, bestD = nil, math.huge
+	for _, tr in ipairs(CollectionService:GetTagged("Tree")) do
+		if tr:IsDescendantOf(workspace) then
+			local g = tr:GetAttribute("groupId")
+			local tid = tr:GetAttribute("treeId")
+			if g and tid and (next(zones) == nil or zones[g]) then
+				local rec = data.trees[g] and data.trees[g][tid]
+				if rec and (rec.hp or 0) > 0 then
+					local model = tr:FindFirstChildWhichIsA("Model")
+					local pp = model and model.PrimaryPart
+					if pp then
+						local d = (pp.Position - pos).Magnitude
+						if d < bestD then
+							bestD, best = d, tr
+						end
+					end
+				end
+			end
+		end
+	end
+	return best
+end
+
+local WOOD_ZONES = {}
+for zone, def in pairs(TreesList) do
+	if type(def) == "table" and type(def.trees) == "table" then
+		for _, tr in pairs(def.trees) do
+			if type(tr) == "table" and tr.item then
+				local ok, nm = pcall(function()
+					return tr.item:getName()
+				end)
+				if ok and nm then
+					WOOD_ZONES[nm] = WOOD_ZONES[nm] or {}
+					table.insert(WOOD_ZONES[nm], zone)
+				end
+			end
+		end
+	end
+end
+
+local function zonesForItems(names)
+	local set = {}
+	for _, nm in ipairs(names) do
+		for _, zone in ipairs(WOOD_ZONES[nm] or {}) do
+			set[zone] = true
+		end
+	end
+	return set
+end
+
+local function densestReadyPile(pos)
+	local all = {}
+	for _, p in ipairs(CollectionService:GetTagged("LeafPile")) do
+		if p:IsDescendantOf(workspace) and not p:GetAttribute("respawnsAt") then
+			all[#all + 1] = p
+		end
+	end
+	local n = #all
+	if n == 0 then
+		return nil, math.huge, 0
+	end
+	local positions = table.create(n)
+	for i = 1, n do
+		positions[i] = all[i]:GetPivot().Position
+	end
+	local radius = 34
+	local best, bestScore, bestD, bestCount = nil, -math.huge, math.huge, 0
+	for i = 1, n do
+		local pi = positions[i]
+		local d = (pi - pos).Magnitude
+		if d < 150 then
+			local count = 0
+			for j = 1, n do
+				if i ~= j and (pi - positions[j]).Magnitude <= radius then
+					count += 1
+				end
+			end
+			local score = count * 6 - d * 0.04
+			if score > bestScore then
+				bestScore, best, bestD, bestCount = score, all[i], d, count
+			end
+		end
+	end
+	if not best then
+		for i = 1, n do
+			local d = (positions[i] - pos).Magnitude
+			if d < bestD then
+				bestD, best = d, all[i]
+			end
+		end
+	end
+	return best, bestD, bestCount
+end
+
+local Tasks = {}
+
+local function stopTask(name)
+	local t = Tasks[name]
+	if not t then
+		return
+	end
+	t.alive = false
+	Tasks[name] = nil
+	REGISTRY.tasks[name] = nil
+	print("[RCU] task stopped: " .. name)
+	if t.onStop then
+		pcall(t.onStop)
+	end
+end
+
+local function startTask(name, runner, interval, onStop)
+	if Tasks[name] then
+		return
+	end
+	local t = {
+		alive = true,
+		onStop = onStop,
+		cooldown = 0,
+	}
+	Tasks[name] = t
+	REGISTRY.tasks[name] = t
+	print("[RCU] task started: " .. name)
+	coroutine.wrap(function()
+		while t.alive and not Fluent.Unloaded and not stale() do
+			local ok, err = pcall(runner, t)
+			if not ok then
+				warn("[RCU] " .. name .. ": " .. tostring(err))
+				if t.alive then
+					task.wait(3)
+				end
+			end
+			if t.alive then
+				task.wait(interval)
+			end
+		end
+	end)()
+end
+
+local function stopAll()
+	local names = {}
+	for name in pairs(Tasks) do
+		names[#names + 1] = name
+	end
+	for _, name in ipairs(names) do
+		stopTask(name)
+	end
+end
+
+local function isRunning(name)
+	return Tasks[name] ~= nil
+end
+
+-- ------------------------------------------------------------------
+-- helpers
+-- ------------------------------------------------------------------
+local function teleportToEgg(t, egg)
+	if not EggController then
+		return false, "EggController missing"
+	end
+	local ok, model = pcall(function()
+		return EggController:getEggModel(egg)
+	end)
+	if not ok or not model then
+		return false, "No egg model for " .. tostring(egg)
+	end
+	local hrp = Functions.getHRP(LocalPlayer)
+	if not hrp then
+		return false, "No character"
+	end
+	local folder = model:FindFirstChild("Egg")
+	local pp = folder and folder:IsA("Model") and folder.PrimaryPart
+	hrp.Anchored = true
+	if pp then
+		hrp:PivotTo(pp.CFrame + pp.CFrame.LookVector * 5.5)
+	else
+		hrp:PivotTo(CFrame.new(model:GetPivot().Position))
+	end
+	task.delay(0.5, function()
+		if hrp.Parent then
+			hrp.Anchored = false
+			hrp.AssemblyLinearVelocity = Vector3.zero
+		end
+	end)
+	local deadline = os.clock() + 10
+	while os.clock() < deadline do
+		if EggController._currentEgg == egg then
+			return true
+		end
+		if (t and not t.alive) or Fluent.Unloaded or stopped then
+			break
+		end
+		task.wait(0.1)
+	end
+	if EggController._currentEgg == egg then
+		return true
+	end
+	return false, "Out of range of " .. tostring(egg)
+end
+
+local function currentRakeIndex(data)
+	if not data or not data.inventory or not data.inventory.fallEvent then
+		return nil
+	end
+	local best = nil
+	for _, entry in pairs(data.inventory.fallEvent) do
+		local def = type(entry) == "table" and FallEventList[entry.nm]
+		if type(def) == "table" and def.isTool and (not best or def.index > best) then
+			best = def.index
+		end
+	end
+	return best
+end
+
+local function totalRakes()
+	local n = 0
+	for _, def in pairs(FallEventList) do
+		if type(def) == "table" and def.isTool then
+			n += 1
+		end
+	end
+	return n
+end
+
+local function unlockedRebirthCap(data)
+	if not data then
+		return 0
+	end
+	local upgrades = UpgradesList.rebirthButtons
+	if not upgrades then
+		return 0
+	end
+	local lvl = upgrades.upgrades[data.upgrades and data.upgrades.rebirthButtons or 0]
+	return lvl and lvl.value or 0
+end
+
+local function rebirthCost(n, data)
+	return (Variables.rebirthPrice + data.rebirths * Variables.rebirthPriceMultiplier) * n
+		+ Variables.rebirthPriceMultiplier * (n * (n - 1) / 2)
+end
+
+local function highestUnlockedRebirth(data)
+	local cap = math.min(unlockedRebirthCap(data), #Rebirths)
+	if cap < 1 then
+		return nil
+	end
+	return cap
+end
+
+-- ------------------------------------------------------------------
+-- runners
+-- ------------------------------------------------------------------
+local function hatchRunner(t)
+	if t.cooldown > os.clock() then
+		return
+	end
+	local egg = eggValueName(Options.EggSelect and Options.EggSelect.Value)
+	if egg == NEAREST_EGG or (Options.AutoHatchNearest and Options.AutoHatchNearest.Value) then
+		local hrp = Functions.getHRP(LocalPlayer)
+		egg = hrp and nearestEggName(hrp) or nil
+	end
+	if not egg or egg == "" then
+		return
+	end
+	local data = getData()
+	if not data or not EggController or not HatchingController then
+		return
+	end
+
+	if EggController._isAutoHatching then
+		pcall(function()
+			EggController._currentEgg = ""
+			EggController._isAutoHatching = false
+			EggService.setIsAutoHatching:Fire()
+		end)
+		if not t.toldGameLoop then
+			t.toldGameLoop = true
+			notify("Auto Hatch", "Stopped the game's own auto hatch - hub is spamming instead.")
+		end
+	end
+	t.toldGameLoop = false
+
+	if EggController._currentEgg ~= egg then
+		local ok, err = teleportToEgg(t, egg)
+		if not ok then
+			if not t.toldRange then
+				t.toldRange = true
+				notify("Auto Hatch", err or "Could not reach egg")
+			end
+			return
+		end
+		t.toldRange = false
+	end
+
+	local params = (EggController:getOpenParams())
+	local enough = true
+	local okA, amount = pcall(function()
+		return Util.eggUtils.getAmountFromOpenType(LocalPlayer, data, egg, 2, params)
+	end)
+	if okA then
+		local okB, has = pcall(function()
+			return Util.eggUtils.hasEnoughToOpen(data, egg, amount, params)
+		end)
+		if okB then
+			enough = has
+		end
+	end
+
+	if not enough then
+		notify("Auto Hatch", "Out of currency for " .. tostring(egg) .. ", stopping.")
+		Options.AutoHatch:SetValue(false)
+		return
+	end
+
+	pcall(function()
+		EggService.openEgg:Fire(egg, 2, params)
+	end)
+
+	local okS, speed = pcall(function()
+		return data.upgrades and data.upgrades.hatchSpeed or 1
+	end)
+	local s = okS and speed and speed > 0 and speed or 1
+	t.cooldown = os.clock() + 4.11 / s
+end
+
+local function rebirthRunner(t)
+	if t.cooldown > os.clock() then
+		return
+	end
+	local data = getData()
+	if not data then
+		return
+	end
+	local idx = highestUnlockedRebirth(data)
+	if not idx then
+		return
+	end
+	local n = Rebirths[idx]
+	if not n or data.clicks < rebirthCost(n, data) then
+		return
+	end
+	local ok, res = pcall(function()
+		return RebirthService:rebirth(idx)
+	end)
+	if ok and res == "success" then
+		t.cooldown = os.clock() + 0.15
+		notify("Auto Rebirth", "Rebirth #" .. idx .. " done")
+	end
+end
+
+local function fallRebirthRunner(t)
+	if t.cooldown > os.clock() then
+		return
+	end
+	local data = getData()
+	if not data then
+		return
+	end
+	local tier = FallRebirths[(data.fallRebirths or 0) + 1]
+	if not tier then
+		if not t.maxed then
+			t.maxed = true
+			notify("Fall", "Every fall rebirth tier is done")
+		end
+		return
+	end
+	if itemAmount(data, "acorns") < (tier.acorns or 0) then
+		return
+	end
+	for _, req in pairs(tier.required or {}) do
+		local need = req:getAmount()
+		if itemAmount(data, req:getName()) < need then
+			return
+		end
+	end
+	local ok, res = pcall(function()
+		return FallService:fallRebirth()
+	end)
+	if ok and res == "success" then
+		t.maxed = false
+		t.cooldown = os.clock() + 3
+		notify("Fall", "Fall rebirth #" .. ((data.fallRebirths or 0) + 1) .. " done")
+	end
+end
+
+local function treeRebirthRunner(t)
+	if t.cooldown > os.clock() then
+		return
+	end
+	local data = getData()
+	if not data then
+		return
+	end
+	local okLevel, level = pcall(function()
+		return Util.fallUtils.getLevelFromXp(data.fallHarvestTreeXp or 0)
+	end)
+	if not okLevel then
+		return
+	end
+	local idx = math.min((data.fallHarvestTreeRebirths or 0) + 1, #HarvestTree.rebirths)
+	local tier = HarvestTree.rebirths[idx]
+	if not tier then
+		return
+	end
+	if level < tier.maxLevel then
+		return
+	end
+	local ok, res = pcall(function()
+		return FallService:fallTreeRebirth()
+	end)
+	if ok and (res == true or res == "success") then
+		t.cooldown = os.clock() + 3
+		notify("Fall", "Tree rebirth #" .. ((data.fallHarvestTreeRebirths or 0) + 1) .. " done")
+	elseif ok and type(res) == "string" then
+		t.cooldown = os.clock() + 10
+	end
+end
+
+local function applyRakeSpeed(on)
+	local ok, hum = pcall(function()
+		return Functions.getHumanoid(LocalPlayer)
+	end)
+	if not ok or not hum then
+		return
+	end
+	if on then
+		local speed = (Options.RakeSpeed and tonumber(Options.RakeSpeed.Value)) or 24
+		hum.WalkSpeed = speed
+	else
+		pcall(function()
+			hum.WalkSpeed = 16
+		end)
+	end
+end
+
+-- Probe for an exposed per-pile rake remote (Knit services are tables, and
+-- fall tools aren't real Tools in the character, so this usually stays nil and
+-- the hub falls back to the snap-to-pile + activity re-grab path below).
+-- Ground Y of a model's footprint so teleports drop on solid ground, never
+-- below the floor or floating in the air.
+local function modelBaseY(m)
+	if not m then
+		return nil
+	end
+	local ok, box = pcall(function()
+		return m:GetBoundingBox()
+	end)
+	if ok and box then
+		return box.Position.Y - box.Size.Y / 2
+	end
+	local ok2, pv = pcall(function()
+		if m:IsA("BasePart") then
+			return m.Position.Y
+		end
+		return m:GetPivot().Position.Y
+	end)
+	if ok2 and pv then
+		return pv
+	end
+	return nil
+end
+
+local groundParams = RaycastParams.new()
+groundParams.FilterType = Enum.RaycastFilterType.Exclude
+groundParams.IgnoreWater = false
+
+local function standLift(hrp)
+	local char = LocalPlayer and LocalPlayer.Character
+	if char then
+		local ok, box = pcall(function()
+			return char:GetBoundingBox()
+		end)
+		if ok and box then
+			local lift = hrp.Position.Y - (box.Position.Y - box.Size.Y / 2)
+			if lift > 0.5 and lift < 12 then
+				return lift
+			end
+		end
+	end
+	return math.max(2.5, (hrp and hrp.Size and hrp.Size.Y or 5) / 2)
+end
+
+local function groundStand(x, z, refY, exclude, hrp)
+	local list = {}
+	if LocalPlayer and LocalPlayer.Character then
+		list[#list + 1] = LocalPlayer.Character
+	end
+	if exclude then
+		list[#list + 1] = exclude
+	end
+	groundParams.FilterDescendantsInstances = list
+	local originY = (refY or (hrp and hrp.Position.Y) or 0) + 300
+	local hit = workspace:Raycast(Vector3.new(x, originY, z), Vector3.new(0, -1400, 0), groundParams)
+	local y = hit and hit.Position.Y or refY
+	if not y then
+		y = hrp and hrp.Position.Y or 0
+	end
+	return Vector3.new(x, y + standLift(hrp), z)
+end
+
+-- ------------------------------------------------------------------
+-- rake: drive FallService.damageLeafPiles directly.
+--
+-- The in-game auto rake is the slow path: it walks to a pile with MoveTo,
+-- then sleeps 1.5s before looking for the next one, so you spend most of
+-- the time travelling instead of hitting. The remote it ends up firing is
+-- FallService.damageLeafPiles(n), where n is how many piles in range the
+-- server should hit.
+--
+-- Measured on this account: the server caps throughput at ~26 leaves/s and
+-- that cap is the same at a 0.02s or a 0.001s gap, so firing faster buys
+-- nothing. What matters is never idling between piles, and sending n equal
+-- to the tool's range (range 1 -> 6/s, 2 -> 13/s, 4 -> 26/s, 8 -> 22/s,
+-- i.e. over-firing gets rejected). So: stand once in the densest live
+-- cluster, hold fire at 0.02s, and only re-target when that cluster dies.
+-- ------------------------------------------------------------------
+local RAKE_GAP = 0.02
+local RAKE_CLUSTER_RADIUS = 26
+
+-- keep-out zones: anything named "part2" is the part 2 event portal, and
+-- snapping into it starts/triggers the event. Never target near one.
+local KEEPOUT_RADIUS = 90
+local keepoutPoints = nil
+local function keepoutList()
+	if keepoutPoints then
+		return keepoutPoints
+	end
+	local list = {}
+	local ok, res = pcall(function()
+		local fallback = workspace:FindFirstChild("Game", true)
+		local root = fallback and fallback:FindFirstChild("Maps", true) or workspace
+		for _, d in ipairs(root:GetDescendants()) do
+			if d:IsA("Model") then
+				local n = string.lower(d.Name)
+				if n:find("part2") or n:find("part 2") or n:find("parttwo") then
+					local okp, p = pcall(function()
+						return d:GetPivot().Position
+					end)
+					if okp and p then
+						list[#list + 1] = p
+					end
+				end
+			end
+		end
+	end)
+	keepoutPoints = (ok and type(res) == "table") and list or {}
+	return keepoutPoints
+end
+
+local function nearKeepout(pos)
+	for _, p in ipairs(keepoutList()) do
+		local dx, dz = pos.X - p.X, pos.Z - p.Z
+		if (dx * dx + dz * dz) < (KEEPOUT_RADIUS * KEEPOUT_RADIUS) then
+			return true, p
+		end
+	end
+	return false
+end
+
+-- best standing spot for raking: the live pile inside the largest tight
+-- cluster, ignoring any cluster that sits near the part 2 portal
+local function bestRakeSpot(pos)
+	local live = {}
+	for _, p in ipairs(CollectionService:GetTagged("LeafPile")) do
+		if p:IsDescendantOf(workspace) and not p:GetAttribute("respawnsAt") then
+			live[#live + 1] = p
+		end
+	end
+	local n = #live
+	if n == 0 then
+		return nil
+	end
+	local pts = table.create(n)
+	for i = 1, n do
+		pts[i] = live[i]:GetPivot().Position
+	end
+	local best, bestScore, bestD = nil, -math.huge, math.huge
+	local r2 = RAKE_CLUSTER_RADIUS * RAKE_CLUSTER_RADIUS
+	for i = 1, n do
+		local d = (pts[i] - pos).Magnitude
+		if d > 1200 then
+			continue
+		end
+		if not nearKeepout(pts[i]) then
+			local count = 0
+			for j = 1, n do
+				if i ~= j then
+					local dx, dz = pts[i].X - pts[j].X, pts[i].Z - pts[j].Z
+					if (dx * dx + dz * dz) <= r2 then
+						count += 1
+					end
+				end
+			end
+			-- prefer dense, and prefer near, but never trade density for the
+			-- part 2 portal - that is a hard veto above, not a penalty
+			local score = count * 10 - d * 0.02
+			if score > bestScore then
+				bestScore, best, bestD = score, live[i], d
+			end
+		end
+	end
+	if not best then
+		-- everything is either gone or inside a keep-out: fall back to the
+		-- nearest legal pile, which may be far away but is never the portal
+		for i = 1, n do
+			local d = (pts[i] - pos).Magnitude
+			if not nearKeepout(pts[i]) and d < bestD then
+				bestD, best = d, live[i]
+			end
+		end
+	end
+	return best
+end
+
+-- how many piles one hit is allowed to claim: the tool's own range
+local function rakeHitCount(data)
+	local ok, n = pcall(function()
+		local bestIdx = -1
+		for _, e in pairs(data.inventory and data.inventory.fallEvent or {}) do
+			local def = type(e) == "table" and FallEventList[e.nm]
+			if type(def) == "table" and def.isTool and (def.index or 0) > bestIdx then
+				bestIdx = def.index or 0
+			end
+		end
+		if bestIdx < 0 then
+			return 1
+		end
+		local range = 1
+		for key, def in pairs(FallEventList) do
+			if type(def) == "table" and def.isTool and def.index == bestIdx then
+				local toolOk, tool = pcall(function()
+					return Items.fallEvent(key)
+				end)
+				if toolOk and tool then
+					local d = tool:directory()[tool:getName()]
+					if type(d) == "table" and type(d.range) == "number" then
+						range = d.range
+					end
+				end
+				break
+			end
+		end
+		local extra = 0
+		local rakeOk, v = pcall(function()
+			return Values.rakeRange(LocalPlayer, data)
+		end)
+		if rakeOk and type(v) == "number" then
+			extra = v
+		end
+		return math.max(1, math.floor(range + extra))
+	end)
+	return (ok and type(n) == "number" and n > 0) and n or 1
+end
+
+local function rakeFarmRunner(t)
+	local data = getData()
+	if not data or not FallService then
+		return
+	end
+	if not data.isRakeToolEquipped then
+		equipRake()
+		return
+	end
+	applyRakeSpeed(true)
+	local hrp = Functions.getHRP(LocalPlayer)
+	if not hrp then
+		return
+	end
+
+	-- Re-anchor is the expensive half (it walks every live pile), so it runs
+	-- on its own slow cadence. Firing happens every tick, which is what
+	-- actually earns leaves.
+	local now = os.clock()
+	if now >= (t.rakeScanAt or 0) then
+		t.rakeScanAt = now + 0.4
+		t.rakeRange = rakeHitCount(data)
+
+		local anchor = t.rakeAnchor
+		local settled = false
+		if anchor and anchor:IsDescendantOf(workspace) and not anchor:GetAttribute("respawnsAt") then
+			if (anchor:GetPivot().Position - hrp.Position).Magnitude <= RAKE_CLUSTER_RADIUS + 8 then
+				settled = true
+			end
+		end
+
+		if not settled then
+			local pile = bestRakeSpot(hrp.Position)
+			if pile then
+				t.idleTime = 0
+				t.rakeAnchor = pile
+				local pp = pile:GetPivot().Position
+				-- groundStand raycasts down and adds the hip lift, so the
+				-- stand point is always on real floor - never under the map
+				local off = pp - hrp.Position
+				off = off.Magnitude > 0.001 and off.Unit or Vector3.new(1, 0, 0)
+				local want = pp - off * 3
+				local stand = groundStand(want.X, want.Z, modelBaseY(pile), pile, hrp)
+				hrp.CFrame = CFrame.lookAt(stand, Vector3.new(pp.X, stand.Y, pp.Z))
+				pcall(function()
+					hrp.AssemblyLinearVelocity = Vector3.zero
+				end)
+			elseif (t.idleTime or 0) + 30 < now then
+				t.idleTime = now
+				notify("Auto Rake", "All piles cleared - waiting for respawns")
+			end
+		end
+	end
+
+	-- never fire from inside the part 2 portal keep-out
+	if nearKeepout(hrp.Position) then
+		return
+	end
+
+	pcall(function()
+		FallService.damageLeafPiles:Fire(t.rakeRange or 1)
+	end)
+end
+
+-- ------------------------------------------------------------------
+-- auto pet crafting: golden -> toxic -> galaxy -> rainbow
+--
+-- The four machines share one component (CraftMachineFrame) and one call:
+--   PetService:craft(itemIds, craftAll, amount)
+-- where itemIds are the inventory ids of the pets to consume. Verified on
+-- this account: craft({id}, false, 1) returns "success" in ~60ms and
+-- consumes exactly 5 copies of that pet to make one at the next tier.
+-- craftAll = true means "craft as many as the stack allows" and is what we
+-- want, since it consumes everything rather than leaving a remainder of 4.
+-- ------------------------------------------------------------------
+local PET_TIERS = { golden = 2, toxic = 3, galaxy = 4, rainbow = 5 }
+local PET_TIER_NAMES = { golden = "Golden", toxic = "Toxic", galaxy = "Galaxy", rainbow = "Rainbow" }
+
+local function petServiceRef()
+	PetService = PetService or getService("PetService")
+	return PetService
+end
+
+-- every pet id sitting one tier below `tier` that the server would accept
+local function petIdsForTier(data, tier)
+	local ids = {}
+	if not data.inventory.pet then
+		return ids
+	end
+	for id, entry in pairs(data.inventory.pet) do
+		if type(entry) == "table" and (entry.ti or 1) == tier - 1 and (entry.am or 0) >= 5 then
+			local ok, item = pcall(function()
+				return Util.itemUtils.getItemFromId(data, id)
+			end)
+			local usable = ok and item ~= nil
+			if usable then
+				-- the game's own filters: can't craft something locked, and
+				-- can't craft to a tier the pet has no image for
+				local okCraft = pcall(function()
+					return Util.petUtils.canCraftToTier(item, tier)
+				end)
+				if not okCraft then
+					usable = false
+				else
+					local got = Util.petUtils.canCraftToTier(item, tier)
+					if got == nil or got == false then
+						usable = false
+					end
+				end
+				if usable then
+					local okLocked = pcall(function()
+						return item:getLocked()
+					end)
+					if okLocked then
+						local lk
+						pcall(function()
+							lk = item:getLocked()
+						end)
+						if lk then
+							usable = false
+						end
+					end
+				end
+				-- favourites are protected by the game's own craft-all path
+				if usable and data.favorites and data.favorites[id] then
+					usable = false
+				end
+			end
+			if usable then
+				ids[#ids + 1] = id
+			end
+		end
+	end
+	return ids
+end
+
+local TiersList = require(ReplicatedStorage.Shared.List.Pets.Tiers)
+
+-- how many copies of tier-1-below exist, used only to report progress
+local function countCraftable(data, tier)
+	local n = 0
+	if not data.inventory.pet then
+		return 0
+	end
+	for _, entry in pairs(data.inventory.pet) do
+		if type(entry) == "table" and (entry.ti or 1) == tier - 1 then
+			n += (entry.am or 0)
+		end
+	end
+	return n
+end
+
+-- currency gate: Tiers[tier].craftPrice names the currency and per-rarity cost
+local function canAffordCraft(data, tier)
+	local def = TiersList[tier]
+	if not def or type(def) ~= "table" or not def.craftPrice then
+		return true
+	end
+	local have = 0
+	local okCur, cur = pcall(function()
+		return Util.itemUtils.getItemFromName(data, def.craftPrice.currency)
+	end)
+	if okCur and cur then
+		pcall(function()
+			have = cur:getAmount()
+		end)
+	end
+	-- cheapest possible craft is the lowest rarity cost
+	local cheapest = math.huge
+	for _, cost in pairs(def.craftPrice.rarities or {}) do
+		if type(cost) == "number" and cost < cheapest then
+			cheapest = cost
+		end
+	end
+	if cheapest == math.huge then
+		return true
+	end
+	return have >= cheapest
+end
+
+local function craftPetsTier(t, tierKey)
+	local svc = petServiceRef()
+	if not svc then
+		return
+	end
+	local tier = PET_TIERS[tierKey]
+	if not tier then
+		return
+	end
+	local data = getData()
+	if not data then
+		return
+	end
+	if not canAffordCraft(data, tier) then
+		return
+	end
+	local ids = petIdsForTier(data, tier)
+	if #ids == 0 then
+		return
+	end
+
+	local before = countCraftable(data, tier)
+	local ok, res = pcall(function()
+		return svc:craft(ids, true)
+	end)
+	if ok and res == "success" then
+		local after = countCraftable(data, tier)
+		local made = math.max(0, before - after)
+		t.crafted = (t.crafted or 0) + (made or 0)
+		t.cooldown = os.clock() + 1.5
+		if t.crafted > 0 then
+			notify(
+				"Pet Craft",
+				("%s: %s -> %s (%d crafted so far)"):format(
+					tierKey:upper(),
+					(PET_TIER_NAMES[tierKey] or "?"),
+					(PET_TIER_NAMES[({golden = "toxic", toxic = "galaxy", galaxy = "rainbow"})[tierKey]] or "?"),
+					t.crafted
+				)
+			)
+		end
+	elseif ok and res ~= nil and res ~= "success" then
+		t.cooldown = os.clock() + 4
+	else
+		t.cooldown = os.clock() + 3
+	end
+end
+
+local function petCraftRunner(t, tierKey)
+	if (t.cooldown or 0) > os.clock() then
+		return
+	end
+	craftPetsTier(t, tierKey)
+end
+
+local function chopRunner(t, zones)
+	local data = getData()
+	if not data or not TreeController then
+		return
+	end
+	if not data.isAxeEquipped then
+		equipAxe()
+		return
+	end
+	local hrp = Functions.getHRP(LocalPlayer)
+	if not hrp then
+		return
+	end
+	zones = zones or (Options.ChopZones and Options.ChopZones.Value) or {}
+	local tree = nil
+	local cur = t.tpTree
+	if cur and cur:IsDescendantOf(workspace) then
+		local g = cur:GetAttribute("groupId")
+		local tid = cur:GetAttribute("treeId")
+		local rec = g and tid and data.trees[g] and data.trees[g][tid]
+		if rec and (rec.hp or 0) > 0 and (next(zones) == nil or zones[g]) then
+			tree = cur
+		end
+	end
+	if not tree then
+		tree = nearestTree(data, hrp.Position, zones)
+		if not tree and next(zones) then
+			tree = nearestTree(data, hrp.Position, {})
+		end
+	end
+	if not tree then
+		t.idle = (t.idle or 0) + 1
+		if t.idle == 1 then
+			pcall(function()
+				TreeController:cancelAutoDamageTree()
+			end)
+		end
+		if (t.idleTime or 0) + 30 < os.clock() then
+			t.idleTime = os.clock()
+			notify("Auto Chop", "All trees down - waiting for respawns")
+		end
+		return
+	end
+	t.idle = 0
+	local model = tree:FindFirstChildWhichIsA("Model")
+	local pp = model and model.PrimaryPart
+	if not pp or pp.Parent == nil or pp.Position == nil then
+		return
+	end
+	local pos = hrp.Position
+	local delta = pp.Position - pos
+	local dir = delta.Magnitude > 0.001 and delta.Unit or pp.CFrame.LookVector
+	local target = pp.Position - dir * 5
+	local baseY = modelBaseY(model)
+	target = groundStand(target.X, target.Z, baseY, model, hrp)
+	if tree ~= t.tpTree then
+		t.tpTree = tree
+		hrp.CFrame = CFrame.lookAt(target, Vector3.new(pp.Position.X, target.Y, pp.Position.Z))
+		pcall(function()
+			hrp.AssemblyLinearVelocity = Vector3.zero
+		end)
+	end
+	pcall(function()
+		TreeController:moveToTree(tree)
+	end)
+end
+
+local function nextAxeName(data)
+	local _, idx = currentAxeIndex(data)
+	if not idx then
+		return nil
+	end
+	for k, v in pairs(ExclusiveDir) do
+		local nm = tostring(k)
+		if v.index == idx + 1 and nm:lower():find("axe") and not nm:lower():find("pickaxe") then
+			return k
+		end
+	end
+	return nil
+end
+
+local function axeFarmRunner(t)
+	local data = getData()
+	if not data or not TreeController then
+		return
+	end
+	local name = nextAxeName(data)
+	local def = name and AxesList[name]
+	if not def or not def.required then
+		return
+	end
+	local woodNeeded = {}
+	for _, req in pairs(def.required) do
+		local rn = req:getName()
+		if req:getAmount() - itemAmount(data, rn) > 0 and WOOD_ZONES[rn] then
+			woodNeeded[#woodNeeded + 1] = rn
+		end
+	end
+	if #woodNeeded == 0 then
+		return
+	end
+	chopRunner(t, zonesForItems(woodNeeded))
+end
+
+local function axeUpgradeRunner(t)
+	if t.cooldown > os.clock() then
+		return
+	end
+	local data = getData()
+	if not data or not AxeService then
+		return
+	end
+	local _, idx = currentAxeIndex(data)
+	if not idx then
+		return
+	end
+	local nextName = nil
+	for k, v in pairs(ExclusiveDir) do
+		local nm = tostring(k)
+		if v.index == idx + 1 and nm:lower():find("axe") and not nm:lower():find("pickaxe") then
+			nextName = k
+		end
+	end
+	if not nextName then
+		return
+	end
+	local def = AxesList[nextName]
+	if not def or not def.required then
+		return
+	end
+	for _, req in pairs(def.required) do
+		if itemAmount(data, req:getName()) < req:getAmount() then
+			return
+		end
+	end
+	local ok, res = pcall(function()
+		return AxeService:upgradeAxe()
+	end)
+	if ok and res == "success" then
+		t.cooldown = os.clock() + 2
+		notify("Axe", "Upgraded to " .. tostring(nextAxeLabel(nextName)))
+	end
+end
+
+local function rewardRunner(t)
+	if t.cooldown > os.clock() then
+		return
+	end
+	local data = getData()
+	if not data or not RewardService then
+		return
+	end
+	local claimed = 0
+	for id, def in pairs(AchievementsList) do
+		local idx = 1
+		for k in pairs(data.claimedAchievements or {}) do
+			if tostring(k):find(id, 1, true) then
+				idx = idx + 1
+			end
+		end
+		local tier = def.list and def.list[idx]
+		if tier then
+			local okV, val = pcall(function()
+				return def.getValue(data)
+			end)
+			if okV and val and val >= tier.amount then
+				local ok, res = pcall(function()
+					return RewardService:claimAchievement(id)
+				end)
+				if ok and res == "success" then
+					claimed += 1
+				end
+			end
+		end
+	end
+	local cd = 1
+	pcall(function()
+		cd = Values.playtimeRewardCooldown(LocalPlayer, data)
+	end)
+	for i, rew in ipairs(PlaytimeRewards) do
+		if not table.find(data.claimedPlaytimeRewards or {}, i) then
+			if rew.required * (1 - cd) - (data.playtimeRewardTimer or 0) <= 0 then
+				local ok, res = pcall(function()
+					return RewardService:claimPlaytimeReward(i)
+				end)
+				if ok and res == "success" then
+					claimed += 1
+				end
+			end
+		end
+	end
+	if (workspace:GetServerTimeNow() - (data.dayReset or 0)) >= 86400 then
+		local ok, res = pcall(function()
+			return RewardService:claimDailyReward()
+		end)
+		if ok and res == "success" then
+			claimed += 1
+		end
+	end
+	if claimed > 0 then
+		t.cooldown = os.clock() + 3
+		notify("Rewards", "Claimed " .. claimed .. " reward" .. (claimed > 1 and "s" or ""))
+	end
+end
+
+local function chestRunner(t)
+	if t.cooldown > os.clock() then
+		return
+	end
+	local data = getData()
+	if not data or not RewardService then
+		return
+	end
+	if ChestController and ChestController.checkAllChests then
+		pcall(function()
+			ChestController:checkAllChests()
+		end)
+		pcall(function()
+			ChestController:checkAllMiniChests()
+		end)
+	end
+	local bonus = 0
+	pcall(function()
+		bonus = Values.chestCooldown(LocalPlayer, data) or 0
+	end)
+	local now = workspace:GetServerTimeNow()
+	local claimed = 0
+	for id, def in pairs(ChestsList) do
+		if type(def) == "table" and def.cooldown then
+			local sub = (def.chestCooldownUpgrades == false) and 0 or bonus
+			if now - ((data.chests and data.chests[id]) or 0) >= def.cooldown - sub then
+				local ok, res = pcall(function()
+					return RewardService:claimChest(id, true)
+				end)
+				if ok and res == "success" then
+					claimed += 1
+				end
+			end
+		end
+	end
+	for _, j in ipairs(CollectionService:GetTagged("MiniChest")) do
+		if j:IsDescendantOf(workspace) and not j:GetAttribute("isAnimating") then
+			local mid = j:GetAttribute("miniChestId")
+			local mname = j:GetAttribute("miniChestName")
+			if mid and mname then
+				local last = (data.miniChests or {})[mname]
+				if type(last) == "boolean" or not last then
+					last = 0
+				end
+				if workspace:GetServerTimeNow() - last >= 86400 then
+					local ok, res = pcall(function()
+						return RewardService:claimMiniChest(mid, mname, true)
+					end)
+					if ok and res == "success" then
+						claimed += 1
+					end
+				end
+			end
+		end
+	end
+	if claimed > 0 then
+		t.cooldown = os.clock() + 2
+		notify("Chests", "Claimed " .. claimed .. " chest" .. (claimed > 1 and "s" or ""))
+	end
+end
+
+local function auraRunner(t)
+	if t.cooldown > os.clock() then
+		return
+	end
+	local data = getData()
+	if not data or not AuraService then
+		return
+	end
+	local dice = diceValueName((Options.AuraDice and Options.AuraDice.Value) or "")
+	if dice == "" then
+		return
+	end
+	local item = Util.itemUtils.getItemFromName(data, dice)
+	if (not item or item:getAmount() <= 0) and Options.AuraAutoSecret and Options.AuraAutoSecret.Value then
+		dice = "secretAuraDice"
+		item = Util.itemUtils.getItemFromName(data, dice)
+	end
+	if not item or dice == "secretAuraDice" and item:getAmount() <= 0 then
+		notify("Auras", "Out of " .. tostring(dice) .. ", stopping.")
+		Options.AutoRollAuras:SetValue(false)
+		return
+	end
+	local ok, status = pcall(function()
+		return AuraService:roll(dice, false)
+	end)
+	if ok and (status == "notEnoughDice" or status == "notEnoughCurrency") then
+		if Options.AutoRollAuras then
+			Options.AutoRollAuras:SetValue(false)
+		end
+		notify("Auras", "Roll stopped: " .. tostring(status))
+	elseif not ok then
+		t.cooldown = os.clock() + 1
+	end
+end
+
+local function farmRunner(t)
+	if t.cooldown > os.clock() then
+		return
+	end
+	local data = getData()
+	if not data or not FarmService then
+		return
+	end
+	local gems = data.gems or 0
+	local acted = 0
+	for id, def in pairs(FarmsList) do
+		if type(def) == "table" and not def.isNotFarm then
+			local owned = data.farms and data.farms[id]
+			if not owned then
+				if gems >= (def.price or math.huge) then
+					local ok, res = pcall(function()
+						return FarmService:buy(id)
+					end)
+					if ok and res == "success" then
+						acted += 1
+					end
+				end
+			elseif type(def.upgrades) == "table" then
+				local stage = owned.stage or 0
+				local up = def.upgrades[stage + 1]
+				if up and up.price and gems >= up.price then
+					local ok, res = pcall(function()
+						return FarmService:upgrade(id)
+					end)
+					if ok and res == "success" then
+						acted += 1
+					end
+				end
+			end
+		end
+	end
+	if acted > 0 then
+		t.cooldown = os.clock() + 1
+		notify("Farms", "Farms: " .. acted .. " action" .. (acted > 1 and "s" or ""))
+	end
+end
+
+-- ------------------------------------------------------------------
+-- auto clicker, orbs, mining, circus
+-- ------------------------------------------------------------------
+local function clickRunner(t)
+	if not ClickService then
+		return
+	end
+	pcall(function()
+		ClickService.click:Fire()
+	end)
+end
+
+local function orbRunner(t)
+	if not OrbController then
+		return
+	end
+	local st = OrbController._orbStorage
+	if not st then
+		return
+	end
+	local names = {}
+	for k in pairs(st) do
+		names[#names + 1] = k
+	end
+	if #names > 0 then
+		pcall(function()
+			OrbController:collectOrbs(names)
+		end)
+	end
+end
+
+local function nearestOre(data, pos)
+	local best, bestD = nil, math.huge
+	for _, ore in ipairs(CollectionService:GetTagged("Ore")) do
+		if ore:IsDescendantOf(workspace) and ore.PrimaryPart then
+			local rid = ore:GetAttribute("roomId")
+			local oid = ore:GetAttribute("id")
+			local entry = rid and data.ores and data.ores[rid] and data.ores[rid][oid]
+			if entry then
+				local d = (ore.PrimaryPart.Position - pos).Magnitude
+				if d < bestD then
+					best, bestD = ore, d
+				end
+			end
+		end
+	end
+	return best, bestD
+end
+
+local function mineRunner(t)
+	local data = getData()
+	if not data or not OreController then
+		return
+	end
+	if not data.isPickaxeEquipped then
+		equipPickaxe()
+		return
+	end
+	local hrp = Functions.getHRP(LocalPlayer)
+	if not hrp then
+		return
+	end
+	local ore = nearestOre(data, hrp.Position)
+	if not ore then
+		return
+	end
+	if OreController._currentOre then
+		if OreController._currentOre == ore then
+			return
+		end
+		pcall(function()
+			OreController:cancelAutoDamageOre()
+		end)
+	end
+	OreController._selectedOre = nil
+	local pp = ore.PrimaryPart
+	local dir = pp.Position - hrp.Position
+	local d = dir.Magnitude
+	if d > 0.001 then
+		dir = dir:Unit()
+	else
+		dir = pp.CFrame.LookVector
+	end
+	local radius = ore:GetAttribute("radius") or 7
+	local target = pp.Position - dir * radius - Vector3.new(0, pp.Size.Y / 2, 0) + Vector3.new(0, hrp.Size.Y, 0)
+	if (target - hrp.Position).Magnitude > 0.5 then
+		hrp.CFrame = CFrame.lookAt(target, pp.Position)
+		pcall(function()
+			hrp.AssemblyLinearVelocity = Vector3.zero
+		end)
+	end
+	pcall(function()
+		if OreController:isStrongEnough(ore) then
+			OreController:moveToOre(ore)
+			OreController:updateOreHealth()
+		end
+	end)
+end
+
+local localTAP_SKIN_SERVICE = TapSkinService
+local function tapSkinService()
+	if localTAP_SKIN_SERVICE then
+		return localTAP_SKIN_SERVICE
+	end
+	local s = getService("TapSkinService")
+	localTAP_SKIN_SERVICE = s
+	return s
+end
+
+-- how many tap orbs of a kind we hold
+local function tapOrbCount(data, orbName)
+	local ok, item = pcall(function()
+		return Util.itemUtils.getItemFromNameAndClass(data, orbName, "tapOrb")
+	end)
+	if not ok or not item then
+		return 0
+	end
+	local ok2, amt = pcall(function()
+		return item:getAmount()
+	end)
+	return (ok2 and amt) or 0
+end
+
+-- TapSkinService:openTapOrb(orb) is a real round-trip to the server and it is
+-- hard-debounced: measured on this account it accepts exactly one roll every
+-- ~2.05s and answers every other call with the string "Debounce". So there is
+-- no point firing faster - we track the observed cadence and let a rejected
+-- call push the next attempt out instead of burning it.
+local function tapSkinRunner(t)
+	local svc = tapSkinService()
+	if not svc then
+		return
+	end
+	local data = getData()
+	if not data then
+		return
+	end
+	local orb = Options.TapOrbSelect and Options.TapOrbSelect.Value
+	if not orb or orb == "" then
+		return
+	end
+	if tapOrbCount(data, orb) <= 0 then
+		if not t.toldEmpty then
+			t.toldEmpty = true
+			notify("Tap Skins", "Out of " .. tostring(orb) .. ", stopping.")
+			if Options.AutoRollTapSkins then
+				Options.AutoRollTapSkins:SetValue(false)
+			end
+		end
+		return
+	end
+	if t.toldEmpty then
+		t.toldEmpty = false
+	end
+	if (t.cooldown or 0) > os.clock() then
+		return
+	end
+
+	local ok, res = pcall(function()
+		return svc:openTapOrb(orb)
+	end)
+	if ok and res == true then
+		t.rolled = (t.rolled or 0) + 1
+		t.debounce = 2.05
+		t.cooldown = os.clock() + t.debounce
+		if t.rolled % 25 == 1 then
+			notify("Tap Skins", "Rolled " .. t.rolled .. " " .. tostring(orb))
+		end
+	elseif ok and res == "Debounce" then
+		-- back off to just past the server's window instead of retrying into it
+		t.cooldown = os.clock() + 0.25
+	else
+		t.cooldown = os.clock() + 2
+	end
+end
+
+local function tapSkinStop(t)
+	if t then
+		t.rolled = nil
+		t.cooldown = nil
+	end
+end
+
+local function circusRunner(t)
+	if not CircusController then
+		return
+	end
+	if CircusController.isAutoPlaying and not CircusController:isAutoPlaying() then
+		pcall(function()
+			CircusController:setIsAutoPlaying(true)
+		end)
+	end
+end
+
+local function skillTreeRunner(t)
+	local data = getData()
+	if not data or not SkillTreeService then
+		return
+	end
+	local norm = (data.currentMap and data.currentMap.mapName or ""):lower():gsub("[^a-z]", "")
+	local treeKey = nil
+	for k in pairs(SkillTreeList) do
+		if k:lower():gsub("[^a-z]", "") == norm then
+			treeKey = k
+			break
+		end
+	end
+	if not treeKey then
+		return
+	end
+	local tree = SkillTreeList[treeKey]
+	local owned = data.skillTree and data.skillTree[treeKey] or {}
+	if type(tree) ~= "table" or type(tree.list) ~= "table" then
+		return
+	end
+	for cat, catData in pairs(tree.list) do
+		if type(catData) == "table" then
+			local parentNeed = type(catData.childOf) == "table"
+			local parentDone = parentNeed and owned[catData.childOf[1] .. "_" .. catData.childOf[2]] == true
+			if (not parentNeed or parentDone) and type(catData.list) == "table" then
+				for _, node in pairs(catData.list) do
+					if type(node) == "table" and node.index and not owned[cat .. "_" .. node.index] then
+						if rawItemAmount(data, node.currency and node.currency.nm) >= (node.price or 0) then
+							local ok, res = pcall(function()
+								return SkillTreeService:buySkillTree(treeKey, cat, node.index)
+							end)
+							if ok and res == "success" then
+								notify("Skill Tree", "Bought " .. tostring(node.name or (cat .. " " .. node.index)))
+								t.cooldown = os.clock() + 1
+								return
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+end
+
+local function antiAfkRunner(t)
+	local hrp = Functions.getHRP(LocalPlayer)
+	local hum = Functions.getHumanoid(LocalPlayer)
+	if not hrp or not hum then
+		return
+	end
+	if (t.lastWiggle or 0) + 25 > os.clock() then
+		return
+	end
+	if hum.MoveDirection.Magnitude > 0.1 then
+		t.lastWiggle = os.clock()
+		return
+	end
+	local startC = hrp.CFrame
+	local startPos = startC.Position
+	hum:MoveTo(startPos + startC.LookVector * 2)
+	task.wait(0.4)
+	local p2 = Functions.getHRP(LocalPlayer)
+	if p2 then
+		p2.CFrame = startC
+		pcall(function()
+			p2.AssemblyLinearVelocity = Vector3.zero
+		end)
+		hum:MoveTo(startPos)
+	end
+	t.lastWiggle = os.clock()
+end
+
+local function respawnRunner(t)
+	local okC, char = pcall(function()
+		return LocalPlayer and LocalPlayer.Character
+	end)
+	if not okC then
+		return
+	end
+	if char then
+		local okH, hum = pcall(function()
+			return char:FindFirstChildWhichIsA("Humanoid")
+		end)
+		if okH and hum and hum.Health > 0 then
+			return
+		end
+	end
+	if (t.lastRespawn or 0) + 4 < os.clock() then
+		t.lastRespawn = os.clock()
+		pcall(function()
+			if LocalPlayer then
+				LocalPlayer:LoadCharacter()
+			end
+		end)
+	end
+end
+
+local function rakeStop()
+	applyRakeSpeed(false)
+	pcall(function()
+		if PlayerService then
+			PlayerService.setAutoActivity:Fire("fallRaking", false)
+		end
+	end)
+end
+
+local function rakeUpgradeRunner(t)
+	if t.cooldown > os.clock() then
+		return
+	end
+	local data = getData()
+	if not data then
+		return
+	end
+	local idx = currentRakeIndex(data)
+	if not idx then
+		return
+	end
+	local nextKey = nil
+	for key, def in pairs(FallEventList) do
+		if type(def) == "table" and def.isTool and def.index == idx + 1 then
+			nextKey = key
+			break
+		end
+	end
+	if not nextKey then
+		if not t.maxed then
+			t.maxed = true
+			notify("Rake", "Every rake is upgraded")
+		end
+		return
+	end
+	local okItem, nextItem = pcall(function()
+		return Items.fallEvent(nextKey)
+	end)
+	if not okItem or not nextItem then
+		return
+	end
+	local def = RakeUpgrader[nextItem:getName()]
+	if not def or not def.required then
+		return
+	end
+	for _, req in pairs(def.required) do
+		if itemAmount(data, req:getName()) < req:getAmount() then
+			return
+		end
+	end
+	local ok, res = pcall(function()
+		return FallToolService:upgradeTool()
+	end)
+	if ok and res == "success" then
+		t.maxed = false
+		t.cooldown = os.clock() + 2
+		notify("Rake", "Upgraded to " .. tostring(nextItem:getRealName()))
+	end
+end
+
+-- ------------------------------------------------------------------
+-- auto fishing (uses the game's own FishingController: travel to the
+-- fishing map, equip the rod, stand at the fishing spot, startFishing,
+-- then re-cast the instant the server confirms a catch - cutting the
+-- game's 2s recast wait down to a fraction)
+-- ------------------------------------------------------------------
+local FISH_MAP_ID = 30
+local FISH_ROD_ID = "1f0595b1df594de9bc45fe9cac1abfc9"
+local FISH_SPOT_CFRAME = CFrame.new(
+	-5335.45312, -92.1107941, -3160.11108,
+	-0.12425144, 0, 0.9922508,
+	3.22610176e-05, 1, 0,
+	-0.99225086, 3.25127985e-05, -0.124251433
+)
+
+local FishingController = nil
+local MapController = nil
+
+local function getControllerSafe(name)
+	local ok, c = pcall(getController, name)
+	return ok and c or nil
+end
+
+local function fishEnv()
+	if not FishingController then
+		return nil
+	end
+	local ok, e = pcall(getfenv, FishingController.startFishing)
+	if not ok or type(e) ~= "table" then
+		return nil
+	end
+	return e
+end
+
+local function fishUv(env, owner, idx)
+	if not env or not owner or not env[owner] then
+		return nil
+	end
+	local ok, v = pcall(debug.getupvalue, env[owner], idx)
+	return ok and v or nil
+end
+
+local function fishSetUv(env, owner, idx, val)
+	local fn = env and env[owner]
+	if not fn then
+		return false
+	end
+	return pcall(debug.setupvalue, fn, idx, val)
+end
+
+local function fishProgressGui()
+	local lp = LocalPlayer
+	local gui = lp and lp.PlayerGui and lp.PlayerGui.MainUI
+	local hull = gui and gui.HUD and gui.HUD.Bars and gui.HUD.Bars.FishingProgress
+	if hull and hull.className == "Frame" then
+		return hull
+	end
+	-- fall back to a scan until the map is loaded
+	local ok, found = pcall(function()
+		for _, v in ipairs(lp.PlayerGui:GetDescendants()) do
+			if v.Name == "FishingProgress" and v:IsA("Frame") then
+				return v
+			end
+		end
+		return nil
+	end)
+	return ok and found or nil
+end
+
+local function resetFishRun(t)
+	t.fishReady = nil
+	t.awaitCatch = nil
+	t.castAt = nil
+	t.lastBite = os.clock()
+	t.pending = nil
+	pcall(function()
+		if FishingController and FishingController:isFishing() then
+			FishingController:stopFishing()
+		end
+	end)
+end
+
+local function fishRunner(t)
+	FishingController = FishingController or getControllerSafe("FishingController")
+	MapController = MapController or getControllerSafe("MapController")
+	InventoryService = InventoryService or getService("InventoryService")
+	if not FishingController or not MapController or not InventoryService then
+		return
+	end
+	local data = getData()
+	if not data then
+		return
+	end
+
+	-- ---------------------------------------------------------------
+	-- 1) travel + rod + stand, once
+	-- ---------------------------------------------------------------
+	if not t.fishReady then
+		local mapOk = pcall(function()
+			return MapController._currentMapId == FISH_MAP_ID
+		end)
+		if not mapOk then
+			pcall(function()
+				MapController:setCurrentMap(FISH_MAP_ID)
+			end)
+			resetFishRun(t)
+			return
+		end
+		local env = fishEnv()
+		if not env then
+			return
+		end
+		if not data.isFishingRodEquipped then
+			local ok, res = pcall(function()
+				return InventoryService:useItem(FISH_ROD_ID, { use = 1, mapId = FISH_MAP_ID })
+			end)
+			if not ok then
+				return
+			end
+			if res ~= "success" and data.isFishingRodEquipped ~= true then
+				task.wait(0.3)
+				return
+			end
+		end
+		local hrp = Functions.getHRP(LocalPlayer)
+		if not hrp then
+			return
+		end
+		-- check the world actually has fishing zones
+		local zones = CollectionService:GetTagged("fishingZone")
+		if #zones == 0 then
+			if (t.idleTime or 0) + 30 < os.clock() then
+				t.idleTime = os.clock()
+				pcall(function()
+					FishingController:reloadFishingWorld()
+				end)
+				notify("Auto Fishing", "Loading fishing world...")
+			end
+			return
+		end
+		local ok, dest = pcall(function()
+			local p = FISH_SPOT_CFRAME.Position
+			return groundStand(p.X, p.Z, p.Y - 20, nil, hrp)
+		end)
+		if not ok then
+			return
+		end
+		hrp.Anchored = true
+		hrp.CFrame = CFrame.new(dest)
+		task.wait(0.4)
+		hrp.Anchored = false
+		pcall(function()
+			hrp.AssemblyLinearVelocity = Vector3.zero
+		end)
+		pcall(debug.setupvalue, env.cancelIfTooFarAway, 3, dest)
+		pcall(debug.setupvalue, env.playWaterSplash, 2, dest)
+		pcall(function()
+			FishingController:startFishing()
+		end)
+		t.castAt = os.clock()
+		t.awaitCatch = nil
+		t.lastBite = os.clock()
+		t.fishReady = true
+		notify("Auto Fishing", "Casting...")
+		return
+	end
+
+	-- ---------------------------------------------------------------
+	-- 2) actual fishing: re-cast the moment the server confirms
+	-- ---------------------------------------------------------------
+	local env = fishEnv()
+	if not env then
+		resetFishRun(t)
+		return
+	end
+	local isFishing = false
+	pcall(function()
+		isFishing = FishingController:isFishing()
+	end)
+	if not isFishing then
+		-- died / world changed / kicked out of fishing
+		resetFishRun(t)
+		task.wait(0.5)
+		return
+	end
+	local prog = fishProgressGui()
+	local hooked = fishUv(env, "increaseHookProgress", 7)
+	local bar = fishUv(env, "increaseHookProgress", 2)
+	local canCast = fishUv(env, "startFishing", 4)
+	local tNow = os.clock()
+
+	if hooked then
+		t.awaitCatch = true
+		t.lastBite = tNow
+	elseif t.awaitCatch then
+		-- bar hit 1, the game fired fishCatched; wait for the server's
+		-- confirmation (bar resets / progress gui hides), then cast again
+		local deadline = tNow + 0.45
+		while prog and prog.Visible and os.clock() < deadline do
+			task.wait(0.02)
+		end
+		fishSetUv(env, "startFishing", 4, true)
+		t.awaitCatch = nil
+		t.castAt = os.clock()
+	elseif not canCast and bar and bar >= 1 and prog and not prog.Visible and not t.castAt then
+		-- startup recovery: game is mid-fishing with the 2s recast timer
+		-- running - take it over
+		fishSetUv(env, "startFishing", 4, true)
+		t.castAt = os.clock()
+	end
+
+	-- watchdog: if a bite never came after a cast, take over again
+	if tNow - (t.lastBite or 0) > 6 and not hooked and not t.awaitCatch then
+		fishSetUv(env, "startFishing", 4, true)
+		t.lastBite = tNow
+	end
+end
+
+local function fishStop(t)
+	if t then
+		t.fishReady = nil
+		t.awaitCatch = nil
+		t.castAt = nil
+	end
+	if FishingController then
+		pcall(function()
+			if FishingController:isFishing() then
+				FishingController:stopFishing()
+			end
+		end)
+	end
+end
+
+local function fallUpgradeRunner(t)
+	if t.cooldown > os.clock() then
+		return
+	end
+	local data = getData()
+	if not data then
+		return
+	end
+	local levels = data.fallUpgrades or {}
+	local bought = 0
+	for key, def in pairs(LeavesMachine) do
+		if type(def) == "table" and type(def.upgrades) == "table" then
+			local lvl = levels[key] or 0
+			local up = def.upgrades[lvl + 1]
+			if up and up.cost and itemAmount(data, up.cost:getName()) >= up.cost:getAmount() then
+				local ok, res = pcall(function()
+					return UpgradeService:upgradeFall(key)
+				end)
+				if ok and res == "success" then
+					bought += 1
+				end
+			end
+		end
+	end
+	if bought > 0 then
+		t.cooldown = os.clock() + 2
+		notify("Fall", "Bought " .. bought .. " fall upgrade" .. (bought > 1 and "s" or ""))
+	end
+end
+
+-- ------------------------------------------------------------------
+-- window
+-- ------------------------------------------------------------------
+local Window = Fluent:CreateWindow({
+	Title = "Rebirth Champions",
+	SubTitle = "ultimate",
+	TabWidth = 160,
+	Size = UDim2.fromOffset(580, 460),
+	Acrylic = false,
+	Theme = "Dark",
+	MinimizeKey = Enum.KeyCode.RightShift,
+})
+
+local Tabs = {
+	Eggs = Window:AddTab({ Title = "Eggs", Icon = "egg" }),
+	Rebirth = Window:AddTab({ Title = "Rebirth", Icon = "refresh-cw" }),
+	Fall = Window:AddTab({ Title = "Fall Event", Icon = "leaf" }),
+	Fishing = Window:AddTab({ Title = "Fishing", Icon = "anchor" }),
+	World = Window:AddTab({ Title = "Trees & Axe", Icon = "trees" }),
+	Rewards = Window:AddTab({ Title = "Rewards", Icon = "gift" }),
+	Machines = Window:AddTab({ Title = "Machines", Icon = "cpu" }),
+	Settings = Window:AddTab({ Title = "Settings", Icon = "settings" }),
+}
+print("[RCU] window ok")
+Options = Fluent.Options or Options or {}
+
+-- Every tab is grouped into named sections so nothing is a flat wall of
+-- toggles.
+--
+-- NOTE on this Fluent build: Tab:AddSection ignores its first argument and
+-- passes the SECOND one straight to the Section component as the header text.
+-- So the correct call is AddSection(<anything>, "Title") - passing a props
+-- table as the only argument hands a table to TextLabel.Text, which throws and
+-- takes the whole tab with it. section() is wrapped in a pcall for that reason:
+-- if AddSection misbehaves we fall back to adding straight to the tab, so a
+-- cosmetic grouping can never cost you the features underneath it.
+local Sections = {}
+local function section(tab, name, icon)
+	-- try the two-arg form this build wants, then the documented props form
+	local built
+	pcall(function()
+		built = Tabs[tab]:AddSection(name, name)
+	end)
+	if type(built) ~= "table" or type(built.AddToggle) ~= "function" then
+		pcall(function()
+			built = Tabs[tab]:AddSection({ Title = name, Icon = icon })
+		end)
+	end
+	if type(built) ~= "table" or type(built.AddToggle) ~= "function" then
+		-- last resort: no grouping, but the features still appear
+		built = Tabs[tab]
+	end
+	Sections[name] = built
+	return built
+end
+
+local uiOk2, uiErr2 = xpcall(function()
+local defaultEgg = "Fall 2026"
+if not table.find(eggNames, defaultEgg) then
+	defaultEgg = eggNames[1]
+end
+
+local ALL_TOGGLE_IDS = {}
+local sectionMembers = {}
+local function bindToggle(target, id, taskName, runner, interval, onStop)
+	local toggle = target:AddToggle(id.id, {
+		Title = id.title,
+		Description = id.desc,
+		Default = false,
+		Callback = function(state)
+			if state == nil then
+				state = Options[id.id] and Options[id.id].Value
+			end
+			if state then
+				startTask(taskName, runner, interval, onStop)
+			else
+				stopTask(taskName)
+			end
+		end,
+	})
+	pcall(function()
+		Options[id.id] = toggle
+	end)
+	ALL_TOGGLE_IDS[#ALL_TOGGLE_IDS + 1] = id.id
+	if id.group then
+		sectionMembers[id.group] = sectionMembers[id.group] or {}
+		table.insert(sectionMembers[id.group], id.id)
+	end
+	return toggle
+end
+
+local function bindPlainToggle(target, key, props)
+	local t = target:AddToggle(key, props)
+	pcall(function()
+		Options[key] = t
+	end)
+	ALL_TOGGLE_IDS[#ALL_TOGGLE_IDS + 1] = key
+	return t
+end
+
+-- ==================================================================
+-- Eggs
+-- ==================================================================
+local secEgg = section("Eggs", "Hatching", "egg")
+local eggStatus = secEgg:AddParagraph({
+	Title = "Status",
+	Content = "Idle",
+})
+
+local eggValues = { NEAREST_EGG }
+for _, name in ipairs(eggNames) do
+	eggValues[#eggValues + 1] = name
+end
+
+local eggDropdown = secEgg:AddDropdown("EggSelect", {
+	Title = "Egg",
+	Description = "Which egg Auto Hatch opens. Pick the closest-egg entry to follow whatever is nearest",
+	Default = NEAREST_EGG,
+	Values = eggValues,
+})
+pcall(function()
+	Options.EggSelect = eggDropdown
+end)
+
+bindPlainToggle(secEgg, "AutoHatchNearest", {
+	Title = "Always nearest egg",
+	Description = "Overrides the dropdown and hatches the closest tagged egg",
+	Default = false,
+})
+
+bindToggle(secEgg, { id = "AutoHatch", title = "Auto Hatch", desc = "Teleports to the egg and opens max as fast as the hatch animation allows", group = "Hatching" }, "hatch", hatchRunner, 0.05)
+
+secEgg:AddButton({
+	Title = "Teleport to egg",
+	Description = "Walks you to the selected egg",
+	Callback = function()
+		local egg = eggValueName(Options.EggSelect.Value)
+		local ok, err = teleportToEgg({ alive = true }, egg)
+		notify("Teleport", ok and ("At " .. tostring(egg)) or tostring(err))
+	end,
+})
+
+-- ==================================================================
+-- Rebirth
+-- ==================================================================
+local secRebirth = section("Rebirth", "Rebirth & Clicks", "refresh-cw")
+local rebirthStatus = secRebirth:AddParagraph({
+	Title = "Status",
+	Content = "Idle",
+})
+
+bindToggle(secRebirth, { id = "AutoRebirth", title = "Auto Rebirth", desc = "Rebirths at the highest unlocked button you can afford", group = "Rebirth" }, "rebirth", rebirthRunner, 0.05)
+bindToggle(secRebirth, { id = "AutoClicker", title = "Auto Clicker", desc = "Clicks the main button at the server's maximum rate", group = "Rebirth" }, "click", clickRunner, 0.045)
+
+-- ==================================================================
+-- Fall Event
+-- ==================================================================
+local secFall = section("Fall", "Fall Event", "leaf")
+local fallStatus = secFall:AddParagraph({
+	Title = "Status",
+	Content = "Idle",
+})
+
+bindToggle(secFall, { id = "AutoFallRebirth", title = "Auto Fall Rebirth", desc = "Rebirths the fall event when every requirement is met", group = "Fall" }, "fallRebirth", fallRebirthRunner, 1.5)
+bindToggle(secFall, { id = "AutoTreeRebirth", title = "Auto Tree Rebirth", desc = "Tree rebirths as soon as the harvest tree hits the needed level", group = "Fall" }, "treeRebirth", treeRebirthRunner, 1.5)
+bindToggle(secFall, { id = "AutoFallUpgrades", title = "Auto Fall Upgrades", desc = "Buys every leaves machine upgrade you can afford", group = "Fall" }, "fallUpgrades", fallUpgradeRunner, 2)
+
+local secRake = section("Fall", "Raking", "leaf")
+local rakeStatus = secRake:AddParagraph({
+	Title = "Rake status",
+	Content = "Idle",
+})
+
+local rakeSpeedSlider = secRake:AddSlider("RakeSpeed", {
+	Title = "Rake walk speed",
+	Description = "Movement speed applied while Auto Rake is on",
+	Default = 24,
+	Min = 16,
+	Max = 120,
+	Rounding = 0,
+})
+pcall(function()
+	Options.RakeSpeed = rakeSpeedSlider
+end)
+
+bindToggle(secRake, { id = "AutoRake", title = "Auto Rake", desc = "Fires the rake remote from the densest cluster of piles - no walking, server-capped throughput", group = "Rake" }, "rakeFarm", rakeFarmRunner, 0.02, rakeStop)
+bindToggle(secRake, { id = "AutoRakeUpgrade", title = "Auto Rake Upgrade", desc = "Buys the next rake the moment it's affordable", group = "Rake" }, "rakeFarmUp", rakeUpgradeRunner, 2)
+
+-- ==================================================================
+-- Fishing
+-- ==================================================================
+local secFish = section("Fishing", "Fishing", "anchor")
+local fishingStatus = secFish:AddParagraph({
+	Title = "Status",
+	Content = "Idle",
+})
+
+-- Paragraph only exposes SetTitle / SetDesc. Calling SetContent throws and, in
+-- this venv-wrapped build, an error here kills every element below it.
+pcall(function()
+	fishingStatus:SetDesc("Drives the game's own FishingController: travels to the fishing map, equips the magic rod, stands at the spot and re-casts the instant a catch is confirmed (removes the game's 2s recast wait).")
+end)
+
+bindToggle(secFish, { id = "AutoFishing", title = "Auto Fishing", desc = "Travels to the fishing map, rods up and fishes at the fastest server-approved cycle", group = "Fishing" }, "fish", fishRunner, 0.1, fishStop)
+
+-- ==================================================================
+-- Trees & Axe
+-- ==================================================================
+local secChop = section("World", "Chopping", "trees")
+local worldStatus = secChop:AddParagraph({
+	Title = "Status",
+	Content = "Idle",
+})
+
+local zoneKeys = {}
+for k in pairs(TreesList) do
+	if type(k) == "string" then
+		zoneKeys[#zoneKeys + 1] = k
+	end
+end
+table.sort(zoneKeys)
+
+local zonesDropdown = secChop:AddDropdown("ChopZones", {
+	Title = "Tree zones",
+	Description = "Which tree zones Auto Chop visits (empty = all)",
+	Values = zoneKeys,
+	Multi = true,
+	Default = {},
+})
+pcall(function()
+	Options.ChopZones = zonesDropdown
+end)
+
+bindToggle(secChop, { id = "AutoChopTrees", title = "Auto Chop Trees", desc = "Teleports to trees and chops them in the selected zones", group = "Chop" }, "chop", chopRunner, 0.5)
+bindToggle(secChop, { id = "AutoFarmAxe", title = "Farm axe materials", desc = "Chops only the wood zones needed to buy your next axe", group = "Chop" }, "axeFarm", axeFarmRunner, 0.5)
+bindToggle(secChop, { id = "AutoUpgradeAxe", title = "Auto Upgrade Axe", desc = "Buys the next axe once you hold its materials", group = "Chop" }, "axeUp", axeUpgradeRunner, 1)
+
+local secMine = section("World", "Mining", "pickaxe")
+bindToggle(secMine, { id = "AutoMine", title = "Auto Mine", desc = "Teleports to ores and mines them with your pickaxe", group = "Mine" }, "mine", mineRunner, 0.5)
+
+-- ==================================================================
+-- Rewards
+-- ==================================================================
+local secRewards = section("Rewards", "Rewards", "gift")
+local rewardStatus = secRewards:AddParagraph({
+	Title = "Status",
+	Content = "Idle",
+})
+
+bindToggle(secRewards, { id = "AutoClaimRewards", title = "Auto Claim Rewards", desc = "Claims achievements, playtime and daily rewards as soon as they are ready", group = "Rewards" }, "rewards", rewardRunner, 3)
+bindToggle(secRewards, { id = "AutoChests", title = "Auto claim chests", desc = "Claims every world chest and mini chest off cooldown", group = "Rewards" }, "chests", chestRunner, 2)
+
+-- ==================================================================
+-- Machines
+-- ==================================================================
+local secAuras = section("Machines", "Auras", "sparkles")
+local machineStatus = secAuras:AddParagraph({
+	Title = "Status",
+	Content = "Idle",
+})
+
+do
+	local diceValues = {}
+	local dData = getData()
+	for _, e in pairs(dData and dData.inventory and dData.inventory.auraDice or {}) do
+		if type(e) == "table" and e.nm then
+			diceValues[#diceValues + 1] = tostring(e.nm) .. "  (" .. suffix(e.am or 0) .. ")"
+		end
+	end
+	table.sort(diceValues)
+	if #diceValues == 0 then
+		diceValues = { "auraDice  (0)" }
+	end
+	local diceDropdown = secAuras:AddDropdown("AuraDice", {
+		Title = "Aura dice",
+		Description = "Which dice Auto Roll uses (count shown)",
+		Default = diceValues[1],
+		Values = diceValues,
+	})
+	pcall(function()
+		Options.AuraDice = diceDropdown
+	end)
+end
+
+bindPlainToggle(secAuras, "AuraAutoSecret", {
+	Title = "Fall back to secret dice",
+	Description = "Use secretAuraDice when the chosen dice runs out",
+	Default = false,
+})
+
+bindToggle(secAuras, { id = "AutoRollAuras", title = "Auto roll auras", desc = "Rolls the chosen dice as fast as the server allows", group = "Auras" }, "auras", auraRunner, 0.2)
+
+local secTap = section("Machines", "Tap Skins", "hand")
+do
+	local TapOrbsList = require(ReplicatedStorage.Shared.List.Items.TapOrbs)
+	local tapOrbValues = {}
+	for orbName in pairs(TapOrbsList) do
+		tapOrbValues[#tapOrbValues + 1] = orbName
+	end
+	table.sort(tapOrbValues)
+
+	local tapOrbDropdown = secTap:AddDropdown("TapOrbSelect", {
+		Title = "Tap orb",
+		Description = "Which orb Auto Roll Tap Skins opens",
+		Default = "basicOrb",
+		Values = tapOrbValues,
+	})
+	pcall(function()
+		Options.TapOrbSelect = tapOrbDropdown
+	end)
+end
+
+bindToggle(secTap, { id = "AutoRollTapSkins", title = "Auto roll tap skins", desc = "Opens tap orbs back to back - the server accepts one roll every ~2s", group = "TapSkins" }, "tapSkins", tapSkinRunner, 0.1, tapSkinStop)
+
+local secPets = section("Machines", "Pet Crafting", "paw-print")
+secPets:AddParagraph({
+	Title = "How it works",
+	Content = "Each machine consumes 5 copies of a pet to make one at the next tier. Chain them in order for the best result: Normal -> Golden -> Toxic -> Galaxy -> Rainbow.",
+})
+
+bindToggle(secPets, { id = "AutoCraftGolden", title = "Craft Golden pets", desc = "5 Normal -> 1 Golden, spends the whole stack each pass", group = "Pets" }, "craftGolden", function(t)
+	petCraftRunner(t, "golden")
+end, 1.5)
+bindToggle(secPets, { id = "AutoCraftToxic", title = "Craft Toxic pets", desc = "5 Golden -> 1 Toxic", group = "Pets" }, "craftToxic", function(t)
+	petCraftRunner(t, "toxic")
+end, 1.5)
+bindToggle(secPets, { id = "AutoCraftGalaxy", title = "Craft Galaxy pets", desc = "5 Toxic -> 1 Galaxy", group = "Pets" }, "craftGalaxy", function(t)
+	petCraftRunner(t, "galaxy")
+end, 1.5)
+bindToggle(secPets, { id = "AutoCraftRainbow", title = "Craft Rainbow pets", desc = "5 Galaxy -> 1 Rainbow", group = "Pets" }, "craftRainbow", function(t)
+	petCraftRunner(t, "rainbow")
+end, 1.5)
+
+local secMisc = section("Machines", "Other Machines", "cpu")
+bindToggle(secMisc, { id = "AutoFarm", title = "Auto buy / upgrade farms", desc = "Buys farms and upgrades them with your gems", group = "Misc" }, "farms", farmRunner, 1.5)
+bindToggle(secMisc, { id = "AutoOrbs", title = "Auto collect orbs", desc = "Picks up every orb on the ground instantly", group = "Misc" }, "orbs", orbRunner, 1.5)
+bindToggle(secMisc, { id = "AutoCircus", title = "Auto circus minigame", desc = "Enables the game's autoplay for the circus minigame", group = "Misc" }, "circus", circusRunner, 2)
+bindToggle(secMisc, { id = "AutoSkillTree", title = "Auto buy skill tree", desc = "Buys every affordable skill on the current map's tree", group = "Misc" }, "skillTree", skillTreeRunner, 0.5)
+
+-- ==================================================================
+-- Settings
+-- ==================================================================
+local secGeneral = section("Settings", "General", "settings")
+local notifyToggle = bindPlainToggle(secGeneral, "ShowNotifications", {
+	Title = "Show notifications",
+	Description = "Off = the hub never pops the bottom-right toasts",
+	Default = false,
+	Callback = function(state)
+		if state == nil then
+			state = Options.ShowNotifications and Options.ShowNotifications.Value
+		end
+		notifyEnabled = state and true or false
+	end,
+})
+
+secGeneral:AddButton({
+	Title = "Stop everything",
+	Description = "Turns every automation off",
+	Callback = function()
+		for _, id in ipairs(ALL_TOGGLE_IDS) do
+			if Options[id] and Options[id].Value then
+				pcall(function()
+					Options[id]:SetValue(false)
+				end)
+			end
+		end
+		notify("Stopped", "All automations are off")
+	end,
+})
+
+local secSafety = section("Settings", "Safety", "shield")
+bindToggle(secSafety, { id = "AntiAfk", title = "Anti-AFK", desc = "Wiggles your character every ~25s when idle so you never get kicked", group = "Safety" }, "afk", antiAfkRunner, 5)
+bindToggle(secSafety, { id = "AutoRespawn", title = "Auto Respawn", desc = "Instantly respawns if you die so automation never stops", group = "Safety" }, "respawn", respawnRunner, 2)
+
+if SaveManager then
+	pcall(function()
+		SaveManager:SetLibrary(Fluent)
+		SaveManager:IgnoreThemeSettings()
+		SaveManager:SetIgnoreIndexes({})
+		SaveManager:SetFolder("FluentRCU/RebirthChampions")
+	end)
+end
+if InterfaceManager then
+	pcall(function()
+		InterfaceManager:SetLibrary(Fluent)
+		InterfaceManager:SetFolder("FluentRCU")
+	end)
+end
+if InterfaceManager then
+	pcall(function()
+		InterfaceManager:BuildInterfaceSection(Tabs.Settings)
+	end)
+end
+if SaveManager then
+	pcall(function()
+		SaveManager:BuildConfigSection(Tabs.Settings)
+	end)
+end
+
+-- ------------------------------------------------------------------
+-- status ticker
+-- ------------------------------------------------------------------
+coroutine.wrap(function()
+		local stage = "start"
+		pcall(function()
+			stage = "egg"
+			stage = "rebirth"
+			stage = "fall"
+			stage = "rake"
+			stage = "world"
+			stage = "rewards"
+		end)
+		while not Fluent.Unloaded and not stopped do
+			stage = "tick"
+			local ok, err = pcall(function()
+			local data = getData()
+			if not data then
+				return
+			end
+			stage = "egg"
+			local egg = eggValueName(Options.EggSelect and Options.EggSelect.Value or "?")
+			local okSpeed, speed = pcall(function()
+				return data.upgrades and data.upgrades.hatchSpeed or 1
+			end)
+			local cycle = okSpeed and speed and speed > 0 and string.format("%.2fs", 4.11 / speed) or "?"
+			eggStatus:SetDesc(
+				string.format(
+					"Egg: %s | in range: %s | hatching: %s | max hatch cycle: %s",
+					tostring(egg),
+					tostring(EggController and EggController._currentEgg == egg),
+					tostring(HatchingController and HatchingController:isHatching()),
+					cycle
+				)
+			)
+
+			stage = "rebirth"
+			local cap = unlockedRebirthCap(data)
+			local target = highestUnlockedRebirth(data)
+			local affordable = target and data.clicks >= rebirthCost(Rebirths[target], data)
+			rebirthStatus:SetDesc(
+				string.format(
+					"Unlocked up to #%d | Target: %s | Clicks: %s | Ready: %s",
+					cap,
+					target and ("#" .. target) or "none",
+					suffix(data.clicks),
+					tostring(affordable)
+				)
+			)
+
+			stage = "fall"
+			local tierNum = (data.fallRebirths or 0) + 1
+			local nextTier = FallRebirths[tierNum]
+			local treeIdx = math.min((data.fallHarvestTreeRebirths or 0) + 1, #HarvestTree.rebirths)
+			local treeTier = HarvestTree.rebirths[treeIdx]
+			local treeLevel = 0
+			local okLevel, lv = pcall(function()
+				return Util.fallUtils.getLevelFromXp(data.fallHarvestTreeXp or 0)
+			end)
+			if okLevel then
+				treeLevel = lv
+			end
+			local levels = data.fallUpgrades or {}
+			local bought = 0
+			for key in pairs(LeavesMachine) do
+				bought += levels[key] or 0
+			end
+			fallStatus:SetDesc(
+				string.format(
+					"Acorns: %s | Fall rebirth: %s | Tree: level %d (needs %d) | Leaves upgrades: %d",
+					suffix(itemAmount(data, "acorns")),
+					nextTier and ("#" .. tierNum) or "maxed",
+					treeLevel,
+					treeTier and treeTier.maxLevel or 0,
+					bought
+				)
+			)
+
+			stage = "rake"
+			local rakeIdx = currentRakeIndex(data)
+			rakeStatus:SetDesc(
+				string.format(
+					"Rake: %s/%d | Auto rake: %s | Auto upgrade: %s",
+					rakeIdx and tostring(rakeIdx) or "?",
+					totalRakes(),
+					tostring(isRunning("rakeFarm")),
+					tostring(isRunning("rakeFarmUp"))
+				)
+			)
+
+			stage = "world"
+			local axeName, axeIdx = currentAxeIndex(data)
+			worldStatus:SetDesc(
+				string.format(
+					"Axe: %s (idx %s) equipped: %s | chopping: %s",
+					tostring(axeName),
+					tostring(axeIdx),
+					tostring(data.isAxeEquipped),
+					tostring(isRunning("chop"))
+				)
+			)
+
+			stage = "rewards"
+			local ready = 0
+			for id, def in pairs(AchievementsList) do
+				local idx = 1
+				for k in pairs(data.claimedAchievements or {}) do
+					if k:find(id, 1, true) then
+						idx += 1
+					end
+				end
+				local tier = def.list[idx]
+				if tier then
+					local okV, val = pcall(def.getValue, data)
+					if okV and val and val >= tier.amount then
+						ready += 1
+					end
+				end
+			end
+			rewardStatus:SetDesc(
+				string.format(
+					"Claimable achievements: %d | playtime timer: %s | claiming: %s | chests: %s",
+					ready,
+					suffix(data.playtimeRewardTimer or 0),
+					tostring(isRunning("rewards")),
+					tostring(isRunning("chests"))
+				)
+			)
+
+			stage = "machines"
+			machineStatus:SetDesc(
+				string.format(
+					"Gems: %s | farms: %s | aura dice: %s | auras: %s",
+					suffix(data.gems or 0),
+					tostring(isRunning("farms")),
+					tostring(diceValueName(Options.AuraDice and Options.AuraDice.Value or "auraDice")),
+					tostring(isRunning("auras"))
+				)
+			)
+		end)
+		if not ok and not Fluent.Unloaded and not stopped then
+			warn("[RCU] status[" .. stage .. "]: " .. tostring(err))
+		end
+		task.wait(1)
+	end
+end)()
+
+-- ------------------------------------------------------------------
+-- teardown
+-- ------------------------------------------------------------------
+-- Surface a failed UI build even though print/warn are silenced, so a broken
+-- tab is diagnosable instead of silently rendering empty.
+rawset(_G, "__RCU_UI_ERROR", uiOk2 and nil or tostring(uiErr2))
+
+local function teardown()
+	if stopped then
+		return
+	end
+	stopped = true
+	stopAll()
+	table.clear(REGISTRY.tasks)
+	pcall(function()
+		Fluent:Destroy()
+	end)
+end
+
+table.insert(REGISTRY.cleanups, teardown)
+rawset(_G, "__RCU_HUB", { stop = teardown })
+print("[RCU] done")
+
+if STATE and type(STATE.onCleanup) == "function" then
+	STATE.onCleanup(teardown)
+end
+
+if SaveManager then
+	pcall(function()
+		SaveManager:LoadAutoloadConfig()
+	end)
+end
+
+Window:SelectTab(1)
+
+notify("Rebirth Champions", "Hub loaded. Right Shift minimizes the window.")
+
+task.spawn(function()
+	local data = getData()
+	if not data or not Util or not Util.eggUtils then
+		return
+	end
+	local priced = { NEAREST_EGG }
+	for _, name in ipairs(eggNames) do
+		local cost, cur = "-", ""
+		local okc, c = pcall(function()
+			return Util.eggUtils.getEggCost(LocalPlayer, data, name, {})
+		end)
+		if okc then
+			cost = suffix(math.floor(tonumber(c) or 0))
+		end
+		local okcur, cur2 = pcall(function()
+			return Util.eggUtils.getCurrency(name, {})
+		end)
+		if okcur then
+			cur = tostring(cur2)
+		end
+		priced[#priced + 1] = name .. "  |  " .. cost .. (cur ~= "" and (" " .. cur) or "")
+	end
+	pcall(function()
+		Options.EggSelect:SetValues(priced)
+	end)
+end)
+end, debug.traceback)
+if not uiOk2 then
+	warn("[RCU] UI BUILD FAILED:\n" .. tostring(uiErr2))
+end
