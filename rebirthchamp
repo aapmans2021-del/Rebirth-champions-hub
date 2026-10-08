@@ -107,6 +107,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CollectionService = game:GetService("CollectionService")
 local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
 local LocalPlayer = Players.LocalPlayer
 
 local Knit = require(ReplicatedStorage.Packages.Knit)
@@ -122,6 +123,7 @@ local HarvestTree = require(ReplicatedStorage.Shared.List.Fall.HarvestTree)
 local LeavesMachine = require(ReplicatedStorage.Shared.List.Fall.LeavesMachine)
 local RakeUpgrader = require(ReplicatedStorage.Shared.List.Fall.RakeUpgrader)
 local FallEventList = require(ReplicatedStorage.Shared.List.Items.FallEvent)
+local Meteors = require(ReplicatedStorage.Shared.List.Meteors)
 local Items = require(ReplicatedStorage.Shared.Items)
 local LocalList = ReplicatedStorage.Shared.List
 local AxesList = require(LocalList.Axes)
@@ -153,6 +155,7 @@ local HatchingController = getController("HatchingController")
 local EggService = getService("EggService")
 local RebirthService = getService("RebirthService")
 local FallService = getService("FallService")
+local EventService = getService("EventService")
 local FallToolService = getService("FallToolService")
 local UpgradeService = getService("UpgradeService")
 local PlayerService = getService("PlayerService")
@@ -203,6 +206,7 @@ task.spawn(function()
 		EggService = getService("EggService") or EggService
 		RebirthService = getService("RebirthService") or RebirthService
 		FallService = getService("FallService") or FallService
+		EventService = getService("EventService") or EventService
 		FallToolService = getService("FallToolService") or FallToolService
 		UpgradeService = getService("UpgradeService") or UpgradeService
 		PlayerService = getService("PlayerService") or PlayerService
@@ -367,57 +371,76 @@ local function currentAxeIndex(data)
 	return nil
 end
 
--- Tool slots are exclusive: the game tracks one equipped axe / pickaxe /
--- rake / rod via the isXEquipped flags, and only one can be active. So
--- equipping means putting the current one away first (useItem(id, {use=0})
--- clears it) and then using the new one, otherwise the flags fight each
--- other and the feature reports itself as equipped while doing nothing.
+-- Tool slots are exclusive. The game tracks what you have out through a set of
+-- isXEquipped flags and only ONE may be active at a time, so switching tools
+-- means putting the current one away first. Doing it this way is what makes
+-- "Auto Mine should unequip the rake and give me the pickaxe" work: we look at
+-- every equipped flag, not just the slot we happen to want.
 --
 -- The game's call shape is useItem(id, {use = count}) with no mapId - passing
--- one makes the server answer nil instead of "success", which is why
--- equipping silently never worked. Rows whose `am` is absent are entries with
--- no quantity (not actually owned), so they are skipped.
-local TOOL_FLAGS = {
+-- one makes the server answer nil instead of "success", which is why equipping
+-- silently never worked. useItem(id, {use = 0}) puts a tool away.
+local TOOL_SLOTS = {
+	{ flag = "isAxeEquipped", where = "exclusive" },
+	{ flag = "isPickaxeEquipped", where = "exclusive" },
+	{ flag = "isRakeToolEquipped", where = "fallEvent" },
+	{ flag = "isFishingRodEquipped", where = "exclusive" },
+	{ flag = "isMountEquipped", where = "exclusive" },
+	{ flag = "isHalloweenWeaponEquipped", where = "exclusive" },
+	{ flag = "isChristmasToolEquipped", where = "exclusive" },
+	{ flag = "isThanksgivingWeaponEquipped", where = "exclusive" },
+}
+
+-- put away every equipped tool except `keepFlag`. Returns how many it cleared.
+local function unequipAllTools(keepFlag)
+	local data = getData()
+	if not data or not InventoryService then
+		return 0
+	end
+	local cleared = 0
+	for _, slot in ipairs(TOOL_SLOTS) do
+		if slot.flag ~= keepFlag and data[slot.flag] then
+			local section = data.inventory and data.inventory[slot.where]
+			for id, e in pairs(section or {}) do
+				-- only owned rows can be toggled
+				local owned = (e.am ~= nil and (e.am or 0) > 0)
+				if not owned then
+					local ok, item = pcall(function()
+						return Util.itemUtils.getItemFromId(data, id)
+					end)
+					if ok and item then
+						local amt
+						pcall(function()
+							amt = item:getAmount()
+						end)
+						owned = (amt or 0) > 0
+					end
+				end
+				if owned then
+					pcall(function()
+						InventoryService:useItem(id, { use = 0 })
+					end)
+					cleared += 1
+					break
+				end
+			end
+		end
+	end
+	if cleared > 0 then
+		-- let the server settle the flags before the next call
+		task.wait(0.2)
+	end
+	return cleared
+end
+
+-- Equip the tool matching `predicate`, first putting away whatever else is out.
+-- Returns true, chosenName.
+local SLOT_FLAGS = {
 	axe = "isAxeEquipped",
 	pickaxe = "isPickaxeEquipped",
-	rake = "isRakeToolEquipped",
 	rod = "isFishingRodEquipped",
 }
 
-local function clearEquippedTool(slot, exceptId)
-	local data = getData()
-	if not data then
-		return
-	end
-	local flag = TOOL_FLAGS[slot]
-	if not flag or not data[flag] then
-		return
-	end
-	-- put away whatever is currently held in this slot
-	if slot == "rake" then
-		for id, e in pairs(data.inventory and data.inventory.fallEvent or {}) do
-			if id ~= exceptId and (e.am or 0) > 0 then
-				pcall(function()
-					InventoryService:useItem(id, { use = 0 })
-				end)
-				break
-			end
-		end
-	else
-		for id, v in pairs(data.inventory and data.inventory.exclusive or {}) do
-			if id ~= exceptId then
-				pcall(function()
-					InventoryService:useItem(id, { use = 0 })
-				end)
-				break
-			end
-		end
-	end
-	-- let the server settle the flag before the next call
-	task.wait(0.15)
-end
-
--- returns true, chosenName
 local function equipTool(slot, predicate)
 	if not InventoryService then
 		return false
@@ -428,8 +451,23 @@ local function equipTool(slot, predicate)
 	end
 	for id, v in pairs(data.inventory.exclusive) do
 		local nm = tostring(v.nm or "")
-		if (v.am ~= nil) and (v.am or 0) > 0 and predicate(nm) then
-			clearEquippedTool(slot, id)
+		-- an item you hold can have no `am` at all (the amount is implied by
+		-- itemUtils resolving it), so fall back to that before giving up
+		local owned = (v.am ~= nil) and (v.am or 0) > 0
+		if not owned then
+			local ok, item = pcall(function()
+				return Util.itemUtils.getItemFromId(data, id)
+			end)
+			if ok and item then
+				local amt
+				pcall(function()
+					amt = item:getAmount()
+				end)
+				owned = (amt or 0) > 0
+			end
+		end
+		if owned and predicate(nm) then
+			unequipAllTools(SLOT_FLAGS[slot])
 			local ok, res = pcall(function()
 				return InventoryService:useItem(id, { use = 1 })
 			end)
@@ -465,7 +503,7 @@ local function equipRake()
 	end
 	if bestId then
 		-- a rake is held in its own slot: put away whatever else is out first
-		clearEquippedTool("rake", bestId)
+		unequipAllTools("isRakeToolEquipped")
 		local ok, res = pcall(function()
 			return InventoryService:useItem(bestId, { use = 1 })
 		end)
@@ -476,7 +514,7 @@ local function equipRake()
 	-- nothing matched; fall back to any owned fall-event tool
 	for id, e in pairs(data.inventory.fallEvent) do
 		if (e.am or 0) > 0 then
-			clearEquippedTool("rake", id)
+			unequipAllTools("isRakeToolEquipped")
 			local ok, res = pcall(function()
 				return InventoryService:useItem(id, { use = 1 })
 			end)
@@ -853,6 +891,13 @@ end
 -- ------------------------------------------------------------------
 -- runners
 -- ------------------------------------------------------------------
+-- Forward declaration. This MUST sit above hatchRunner: Lua resolves an
+-- upvalue at compile time from the scope where the function is *defined*, so
+-- declaring it further down would make hatchRunner capture the (nil) global
+-- instead - which is exactly what happened, and it made every hatch tick die
+-- with "attempt to call a nil value" before it ever fired the remote.
+local applyHatchInterval
+
 local function hatchRunner(t)
 	if t.cooldown > os.clock() then
 		return
@@ -923,7 +968,8 @@ local function hatchRunner(t)
 		return data.upgrades and data.upgrades.hatchSpeed or 1
 	end)
 	local s = okS and speed and speed > 0 and speed or 1
-	t.cooldown = os.clock() + 4.11 / s
+	t.hatchSpeed = s
+	applyHatchInterval(t)
 end
 
 local function rebirthRunner(t)
@@ -1341,6 +1387,32 @@ local function rakeFarmRunner(t)
 	if now >= (t.rakeScanAt or 0) then
 		t.rakeScanAt = now + 0.4
 		t.rakeRange = rakeHitCount(data)
+		-- the shrink animation length the game uses: 0.5 / (toolSpeed + upgrade)
+		pcall(function()
+			local item
+			for _, e in pairs(data.inventory and data.inventory.fallEvent or {}) do
+				local def = type(e) == "table" and FallEventList[tostring(e.nm)]
+				if type(def) == "table" and def.isTool and (def.index or 0) > (t.rakeToolIdx or -1) then
+					t.rakeToolIdx = def.index
+				end
+			end
+			if t.rakeToolIdx then
+				for key, def in pairs(FallEventList) do
+					if type(def) == "table" and def.isTool and def.index == t.rakeToolIdx then
+						local okT, tool = pcall(function()
+							return Items.fallEvent(key)
+						end)
+						if okT and tool then
+							local d = tool:directory()[tool:getName()]
+							if type(d) == "table" and type(d.speed) == "number" then
+								item = d.speed
+							end
+						end
+					end
+				end
+			end
+			t.rakeToolSpeed = (item or 1) + (Values.rakeSpeed(LocalPlayer, data) or 0)
+		end)
 
 		local anchor = t.rakeAnchor
 		local settled = false
@@ -1378,15 +1450,193 @@ local function rakeFarmRunner(t)
 		return
 	end
 
-	-- Deliberately NOT faking the piles' client-side `damage` /
-	-- `respawnsAt` attributes. Doing so looks like a fix but poisons the
-	-- server's own view: the server skips piles we have already flagged as
-	-- respawning, so the moment 7 fake hits land on the nearest few, they
-	-- stop paying out entirely and throughput drops to zero. Measured: with
-	-- the fake bookkeeping on, 0 leaves/s; with it off, ~22 leaves/s.
+	local n = t.rakeRange or 1
+
+	-- The pile bookkeeping the game's own onClick does, which we have to
+	-- mirror. Reading LeafRakeController: each hit sets `damage` +1, and
+	-- updateLeafPiles() tweens the pile down by Y * (damage/7) so it visibly
+	-- shrinks; at damage 7 it sets `respawnsAt = os.time() + respawnDelay`,
+	-- which is what finally removes it from play. Without this the piles never
+	-- change at all and the cluster we are parked on looks frozen.
+	--
+	-- (An earlier version of this file skipped this as "poisoning the server".
+	-- That was a misdiagnosis: the 0/s reading that prompted it was taken before
+	-- the map-travel fix, when there were no piles in range at all. The server
+	-- picks its own targets; these attributes are purely the client view.)
+	local origin = hrp.Position - Vector3.new(0, humHipHeight(), 0) + hrp.CFrame.LookVector * 3
+	local reach = (n + 3) * 1.5
+	local respawnDelay = 35
 	pcall(function()
-		FallService.damageLeafPiles:Fire(t.rakeRange or 1)
+		respawnDelay = Values.leavesSpawnDuration(LocalPlayer, data) or 35
 	end)
+
+	local inRange = {}
+	for _, pile in pairs(CollectionService:GetTagged("LeafPile")) do
+		if not pile:GetAttribute("respawnsAt") then
+			local ok, pv = pcall(function()
+				return pile:GetPivot().Position
+			end)
+			if ok and (pv - origin).Magnitude < reach then
+				inRange[#inRange + 1] = { pile = pile, pos = pv }
+			end
+		end
+	end
+	-- nearest first, exactly like the game's own loop over the tagged list
+	table.sort(inRange, function(a, b)
+		return (a.pos - origin).Magnitude < (b.pos - origin).Magnitude
+	end)
+
+	local hits = math.min(#inRange, n)
+	for i = 1, hits do
+		local pile = inRange[i].pile
+		local dmg = (pile:GetAttribute("damage") or 0) + 1
+		pile:SetAttribute("damage", dmg)
+		if dmg >= 7 then
+			pile:SetAttribute("respawnsAt", os.time() + respawnDelay)
+		elseif not pile:GetAttribute("lastDamage") or pile:GetAttribute("lastDamage") ~= dmg then
+			-- same shrink tween as updateLeafPiles, so the pile visibly sinks
+			local pivot = pile:GetAttribute("pivot")
+			local part = pile.PrimaryPart
+			if part and not pile:GetAttribute("isTweening") then
+				if not pivot then
+					pcall(function()
+						pile:SetAttribute("pivot", pile:GetPivot())
+					end)
+					pivot = pile:GetAttribute("pivot")
+				end
+				if pivot then
+					local sizeY = part.Size.Y
+					local target = pivot * CFrame.new(0, -(sizeY * (dmg / 7)) - 0.01, 0)
+					local dur = 0.5 / ((t.rakeToolSpeed or 1) + 1)
+					pcall(function()
+						TweenService:Create(pile, TweenInfo.new(dur), {
+							finalCFrame = target,
+						}):Play()
+					end)
+					pile:SetAttribute("lastDamage", dmg)
+					pile:SetAttribute("isTweening", true)
+					task.delay(dur, function()
+						pile:SetAttribute("isTweening", nil)
+					end)
+				end
+			end
+		end
+	end
+	t.lastHits = hits
+	t.lastPileCount = #inRange
+
+	pcall(function()
+		FallService.damageLeafPiles:Fire(n)
+	end)
+end
+
+-- ------------------------------------------------------------------
+-- auto meteor destroying
+--
+-- Meteors (Meteorite Shower) are tagged "Meteor" and carry meteorId /
+-- meteorType / damage. EventController:onClickMeteor() is the whole game
+-- behaviour: for every meteor within 25 studs of the HRP, fire
+-- EventService.damageMeteorFastDenRiktiga with its meteorId. So this is the
+-- same remote-fire shape as the rake - walk within 25 studs, then spam.
+--
+-- One remote is named "jag känner en bot..." in Swedish. It is still just a
+-- RemoteWrapper with Fire(), reached as EventService.damageMeteorFastDenRiktiga,
+-- so the odd name costs us nothing.
+-- ------------------------------------------------------------------
+local METEOR_HIT_RANGE = 25
+local METEOR_STAND_RANGE = 18
+
+local function meteorRef()
+	EventService = EventService or getService("EventService")
+	return EventService
+end
+
+local function meteorHealth(meteor)
+	local ok, def = pcall(function()
+		return Meteors[meteor:GetAttribute("meteorType")]
+	end)
+	if ok and type(def) == "table" and type(def.health) == "number" then
+		return def.health
+	end
+	return nil
+end
+
+local function meteorRunner(t)
+	local es = meteorRef()
+	local hrp = Functions.getHRP(LocalPlayer)
+	if not es or not es.damageMeteorFastDenRiktiga or not hrp then
+		return
+	end
+
+	local here, nearest, nearestDist = {}, nil, math.huge
+	for _, meteor in pairs(CollectionService:GetTagged("Meteor")) do
+		local part = meteor.PrimaryPart
+		if part then
+			local d = (part.Position - hrp.Position).Magnitude
+			if d < METEOR_HIT_RANGE then
+				here[#here + 1] = meteor
+			end
+			if d < nearestDist then
+				nearest, nearestDist = meteor, d
+			end
+		end
+	end
+
+	if #here == 0 then
+		if nearest and nearestDist > METEOR_STAND_RANGE then
+			-- nothing in reach: close on the nearest meteor. Anchor the stand
+			-- point off its own pivot so we never end up inside the rock.
+			local pp = nearest:GetPivot().Position
+			local to = pp - hrp.Position
+			to = to.Magnitude > 0.001 and to.Unit or Vector3.new(1, 0, 0)
+			local stand = groundStand((pp - to * METEOR_STAND_RANGE).X, (pp - to * METEOR_STAND_RANGE).Z, modelBaseY(nearest), nearest, hrp)
+			hrp.CFrame = CFrame.lookAt(stand, Vector3.new(pp.X, stand.Y, pp.Z))
+			pcall(function()
+				hrp.AssemblyLinearVelocity = Vector3.zero
+			end)
+		end
+		t.lastHits = 0
+		t.lastMeteors = 0
+		if (t.idleTime or 0) + 30 < os.clock() and not t.toldIdle then
+			t.toldIdle = true
+			t.idleTime = os.clock()
+			notify("Auto Meteor", "No meteor in range yet")
+		end
+		return
+	end
+	t.toldIdle = false
+
+	-- nearest first, and report which one we are working on
+	table.sort(here, function(a, b)
+		return (a.PrimaryPart.Position - hrp.Position).Magnitude < (b.PrimaryPart.Position - hrp.Position).Magnitude
+	end)
+
+	local best = here[1]
+	local hp = meteorHealth(best)
+	local dmg = best:GetAttribute("damage") or 0
+	t.lastHits = #here
+	t.lastMeteors = #CollectionService:GetTagged("Meteor")
+	t.targetType = best:GetAttribute("meteorType")
+	if hp then
+		t.targetDesc = ("%s %d/%d (%d in range)"):format(tostring(t.targetType), hp - dmg, hp, #here)
+	else
+		t.targetDesc = ("%s %d dmg (%d in range)"):format(tostring(t.targetType), dmg, #here)
+	end
+
+	-- the server owns the health attribute; we only fire
+	for _, meteor in ipairs(here) do
+		local id = meteor:GetAttribute("meteorId")
+		if id then
+			pcall(function()
+				es.damageMeteorFastDenRiktiga:Fire(id)
+			end)
+		end
+	end
+end
+
+local function meteorStop(t)
+	t.lastHits = nil
+	t.lastMeteors = nil
 end
 
 -- ------------------------------------------------------------------
@@ -1758,7 +2008,10 @@ local function chopRunner(t, zones)
 	end
 
 	local wantMaps = {}
-	for zone in pairs(zones) do
+	-- selectedSet returns nil when nothing is selected (or only "Any"), so
+	-- this loop has to tolerate nil - it used to throw
+	-- "invalid argument #1 to 'pairs'" on every tick with an empty dropdown.
+	for zone in pairs(zones or {}) do
 		local def = TreesList[zone]
 		if type(def) == "table" and def.mapId then
 			wantMaps[#wantMaps + 1] = { map = def.mapId, zone = zone }
@@ -2486,8 +2739,9 @@ local function tapSkinRunner(t)
 	local order = {}
 	local picked = selectedSet(Options.TapOrbSelect)
 	if picked then
-		for name in pairs(picked) do
-			table.insert(order, name)
+		for label in pairs(picked) do
+			-- dropdown values carry the "name  (count)" suffix now
+			table.insert(order, diceValueName(label))
 		end
 		table.sort(order)
 	end
@@ -2555,6 +2809,52 @@ local function circusRunner(t)
 	end
 end
 
+-- The game gates a skill three ways, all of which have to be honoured or the
+-- server silently refuses:
+--   1. the TREE may need a mastery tier (paradox needs paradoxMastery)
+--   2. a CATEGORY may need a mastery tier
+--   3. a category can be childOf another category's node, and within a
+--      category node N is only reachable once its prerequisites are owned.
+--      getVisibleHexagons spells out the rule per index:
+--        i == 1 or 2 -> always visible
+--        i == 3       -> needs index 1
+--        i == 4       -> needs index 2
+--        i >= 5       -> needs index i-1
+--      and a childOf category is only processed once its parent has any
+--      visible node at all.
+-- The old version walked `pairs(catData.list)` (unordered), ignored
+-- prerequisites and mastery, and bailed out after a single purchase per
+-- pass with a 1s cooldown - so it stalled on the first node the server
+-- rejected and never got through the tree. This walks categories in
+-- dependency order, nodes in index order, and buys every affordable
+-- prerequisite-satisfied node in one pass.
+local function skillMasteryOk(data, req)
+	if type(req) ~= "table" or not req.name then
+		return true
+	end
+	local ok, tier = pcall(function()
+		return Util.masteryUtils.getTier(data, req.name)
+	end)
+	if not ok or type(tier) ~= "number" then
+		return true
+	end
+	return tier >= (req.tier or 0)
+end
+
+-- is node `i` of `catData` unlocked, per the rule above?
+local function skillNodeVisible(owned, catData, i)
+	if i <= 2 then
+		return true
+	end
+	if i == 3 then
+		return owned[(catData._key or "") .. "_1"] == true
+	end
+	if i == 4 then
+		return owned[(catData._key or "") .. "_2"] == true
+	end
+	return owned[(catData._key or "") .. "_" .. (i - 1)] == true
+end
+
 local function skillTreeRunner(t)
 	local data = getData()
 	if not data or not SkillTreeService then
@@ -2568,35 +2868,95 @@ local function skillTreeRunner(t)
 			break
 		end
 	end
-	if not treeKey then
-		return
-	end
-	local tree = SkillTreeList[treeKey]
-	local owned = data.skillTree and data.skillTree[treeKey] or {}
+	local tree = treeKey and SkillTreeList[treeKey]
 	if type(tree) ~= "table" or type(tree.list) ~= "table" then
 		return
 	end
-	for cat, catData in pairs(tree.list) do
-		if type(catData) == "table" then
-			local parentNeed = type(catData.childOf) == "table"
-			local parentDone = parentNeed and owned[catData.childOf[1] .. "_" .. catData.childOf[2]] == true
-			if (not parentNeed or parentDone) and type(catData.list) == "table" then
-				for _, node in pairs(catData.list) do
-					if type(node) == "table" and node.index and not owned[cat .. "_" .. node.index] then
-						if rawItemAmount(data, node.currency and node.currency.nm) >= (node.price or 0) then
-							local ok, res = pcall(function()
-								return SkillTreeService:buySkillTree(treeKey, cat, node.index)
-							end)
-							if ok and res == "success" then
-								notify("Skill Tree", "Bought " .. tostring(node.name or (cat .. " " .. node.index)))
-								t.cooldown = os.clock() + 1
-								return
+	if not skillMasteryOk(data, tree.requiredMastery) then
+		return
+	end
+	local owned = (data.skillTree and data.skillTree[treeKey]) or {}
+
+	-- build the work list: root categories first, then child categories
+	-- ordered by how deep their parent sits, so a chain like
+	-- acornsBase -> acornsMain -> acornsHigher resolves in one pass.
+	local roots, children = {}, {}
+	local catKeys = {}
+	for k in pairs(tree.list) do
+		catKeys[#catKeys + 1] = k
+	end
+	table.sort(catKeys)
+	for _, k in ipairs(catKeys) do
+		local c = tree.list[k]
+		if type(c) == "table" and type(c.list) == "table" then
+			c._key = k
+			if type(c.childOf) == "table" then
+				children[#children + 1] = { key = k, data = c }
+			else
+				roots[#roots + 1] = { key = k, data = c }
+			end
+		end
+	end
+
+	local bought = 0
+	local function tryCategory(entry)
+		local cat, catData = entry.key, entry.data
+		if not skillMasteryOk(data, catData.requiredMastery) then
+			return
+		end
+		for i = 1, #catData.list do
+			local node = catData.list[i]
+			if type(node) == "table" and node.index then
+				local key = cat .. "_" .. node.index
+				if not owned[key] and skillNodeVisible(owned, catData, i) then
+					if rawItemAmount(data, node.currency and node.currency.nm) >= (node.price or 0) then
+						local ok, res = pcall(function()
+							return SkillTreeService:buySkillTree(treeKey, cat, node.index)
+						end)
+						if ok and res == "success" then
+							owned[key] = true
+							bought += 1
+							if notifyEnabled and bought <= 3 then
+								notify("Skill Tree", "Bought " .. tostring(node.name or key))
 							end
+							-- keep going: the next index may now be unlocked
+						elseif res ~= "success" then
+							-- rejected: do not hammer the same node, the server
+							-- wants a beat between calls
+							return
 						end
+					else
+						-- cannot afford this one; everything after it is either
+						-- locked behind it or more expensive, so this category is
+						-- done for now
+						break
 					end
 				end
 			end
 		end
+	end
+
+	for _, e in ipairs(roots) do
+		tryCategory(e)
+	end
+	-- resolve child categories, repeating so a chain gets fully walked
+	for _ = 1, 4 do
+		local progressed = false
+		for _, e in ipairs(children) do
+			local pk = e.data.childOf
+			if owned[pk[1] .. "_" .. pk[2]] then
+				tryCategory(e)
+				progressed = true
+			end
+		end
+		if not progressed then
+			break
+		end
+	end
+
+	t.lastBought = bought
+	if bought > 0 then
+		t.cooldown = os.clock() + 0.5
 	end
 end
 
@@ -3269,7 +3629,7 @@ bindPlainToggle(secEgg, "AutoHatchNearest", {
 	Default = false,
 })
 
-bindToggle(secEgg, { id = "AutoHatch", title = "Auto Hatch", desc = "Teleports to the egg and opens max as fast as the hatch animation allows", group = "Hatching" }, "hatch", hatchRunner, 0.05)
+bindToggle(secEgg, { id = "AutoHatch", title = "Auto Hatch", desc = "Teleports to the egg and opens max as fast as the server answers (~46 pets/s with the animation off)", group = "Hatching" }, "hatch", hatchRunner, 0.02)
 
 secEgg:AddButton({
 	Title = "Teleport to egg",
@@ -3486,17 +3846,43 @@ local secTap = section("Machines", "Tap Skins", "hand")
 do
 	local TapOrbsList = require(ReplicatedStorage.Shared.List.Items.TapOrbs)
 	local tapOrbValues = {}
+	local orbCount = {}
+	local dData = getData()
+	for _, e in pairs(dData and dData.inventory and dData.inventory.tapOrb or {}) do
+		if type(e) == "table" and e.nm then
+			orbCount[tostring(e.nm)] = e.am or 0
+		end
+	end
 	for orbName in pairs(TapOrbsList) do
-		tapOrbValues[#tapOrbValues + 1] = orbName
+		-- same "name  (count)" format the aura dice dropdown uses, so the two
+		-- read the same way
+		tapOrbValues[#tapOrbValues + 1] = orbName .. "  (" .. suffix(orbCount[orbName] or 0) .. ")"
 	end
 	table.sort(tapOrbValues)
+
+	-- the skins you actually own, with counts - the aura section has no
+	-- equivalent, so this is the tap-skin answer to "how many do I have"
+	local owned = {}
+	for _, e in pairs(dData and dData.inventory and dData.inventory.tapSkin or {}) do
+		if type(e) == "table" and e.nm then
+			owned[#owned + 1] = tostring(e.nm) .. "  (" .. suffix(e.am or 0) .. ")"
+		end
+	end
+	table.sort(owned)
+	if #owned == 0 then
+		owned = { "none owned yet" }
+	end
+	secTap:AddParagraph({
+		Title = "Tap skins owned",
+		Content = table.concat(owned, ", "),
+	})
 
 	-- Multi: opens whichever picked orb it can still afford, rotating through
 	-- the list so one running out does not end the toggle.
 	local tapOrbDropdown = secTap:AddDropdown("TapOrbSelect", {
 		Title = "Tap orbs",
 		Description = "Pick as many orbs as you want. Opens whichever you can still afford",
-		Default = { basicOrb = true },
+		Default = { (tapOrbValues[1] or "basicOrb  (0)") .. " = true" },
 		Values = tapOrbValues,
 		Multi = true,
 	})
@@ -3528,11 +3914,105 @@ end, 1.5)
 
 bindToggle(secPets, { id = "AutoEquipBestPets", title = "Auto equip best pets", desc = "Re-equips whenever a better pet shows up, using the game's own multiplier sort", group = "Pets" }, "equipBest", equipBestRunner, 1)
 
+local secMeteors = section("Machines", "Meteors", "meteor")
+local meteorStatus = secMeteors:AddParagraph({
+	Title = "Meteor status",
+	Content = "Idle",
+})
+bindToggle(secMeteors, {
+	id = "AutoMeteor",
+	title = "Auto destroy meteors",
+	desc = "Walks to a meteorite and spams damage on it during Meteorite Shower",
+	group = "Misc",
+}, "meteors", meteorRunner, 0.02, meteorStop)
 local secMisc = section("Machines", "Other Machines", "cpu")
 bindToggle(secMisc, { id = "AutoFarm", title = "Auto buy / upgrade farms", desc = "Buys farms and upgrades them with your gems", group = "Misc" }, "farms", farmRunner, 1.5)
 bindToggle(secMisc, { id = "AutoOrbs", title = "Auto collect orbs", desc = "Picks up every orb on the ground instantly", group = "Misc" }, "orbs", orbRunner, 1.5)
 bindToggle(secMisc, { id = "AutoCircus", title = "Auto circus minigame", desc = "Enables the game's autoplay for the circus minigame", group = "Misc" }, "circus", circusRunner, 2)
 bindToggle(secMisc, { id = "AutoSkillTree", title = "Auto buy skill tree", desc = "Buys every affordable skill on the current map's tree", group = "Misc" }, "skillTree", skillTreeRunner, 0.5)
+
+-- ==================================================================
+-- Settings: auto save
+-- ==================================================================
+-- SaveManager already builds its own config section, but it only writes when
+-- you press its Save button. Nothing here ever pressed it, so a hub reload
+-- (or a crash, or a rejoin) silently threw away every toggle. Two safety nets:
+--   - a rolling ticker, so a crash between saves loses at most one interval
+--   - save on the way out, via teardown, so a clean stop is never lost
+-- A plain file backup is written too, since SaveManager lives in the executor's
+-- storage and that can be wiped independently of this script.
+local AUTOSAVE_ENABLED = true
+local AUTOSAVE_INTERVAL = 30
+local AUTOSAVE_KEY = "rcu_hub_autosave.json"
+
+local function optionSnapshot()
+	local snap = {}
+	for id, opt in pairs(Options) do
+		local ok, v = pcall(function()
+			return opt.Value
+		end)
+		if ok then
+			-- Multi dropdowns store a set, which json cannot hold as an array
+			if type(v) == "table" then
+				local keys = {}
+				for k in pairs(v) do
+					if type(k) == "string" then
+						keys[#keys + 1] = k
+					end
+				end
+				table.sort(keys)
+				snap[id] = keys
+			else
+				snap[id] = v
+			end
+		end
+	end
+	return snap
+end
+
+local function saveAllSettings()
+	if not AUTOSAVE_ENABLED then
+		return
+	end
+	if SaveManager then
+		pcall(function()
+			SaveManager:Save()
+		end)
+	end
+	-- our own copy, readable even if SaveManager's storage is gone
+	pcall(function()
+		writefile(AUTOSAVE_KEY, game:GetService("HttpService"):JSONEncode(optionSnapshot()))
+	end)
+end
+
+local function loadAllSettings()
+	if SaveManager then
+		local ok = pcall(function()
+			SaveManager:LoadConfig()
+		end)
+		if ok then
+			return
+		end
+	end
+	pcall(function()
+		local raw = readfile(AUTOSAVE_KEY)
+		if type(raw) ~= "string" or raw == "" then
+			return
+		end
+		local snap = game:GetService("HttpService"):JSONDecode(raw)
+		if type(snap) ~= "table" then
+			return
+		end
+		for id, v in pairs(snap) do
+			local opt = Options[id]
+			if opt and pcall(function()
+				opt:SetValue(v)
+			end) then
+				print("[RCU] restored setting: " .. id)
+			end
+		end
+	end)
+end
 
 -- ==================================================================
 -- Settings
@@ -3564,6 +4044,374 @@ secGeneral:AddButton({
 		notify("Stopped", "All automations are off")
 	end,
 })
+
+-- ------------------------------------------------------------------
+-- remove the hatch animation
+--
+-- The animation is HatchingController:playEggAnimation, driven by the
+-- openEgg remote. It does a lot more than draw eggs: it closes every
+-- game frame, hides the HUD, and sets _isHatching = true, which is what
+-- makes the game itself refuse input - OpenFrame, OpenSkillTree,
+-- ChestController, GardenController and EggController all early-return
+-- while isHatching() is true. So "can't use the game UI while hatching"
+-- is not just the animation covering the screen, it is the game locking
+-- you out on purpose.
+--
+-- The hatch result comes from the server and is already in the
+-- inventory when openEgg fires, so nothing about a hatch depends on
+-- this function running. Replacing it with one that touches no GUI state
+-- at all is enough. _isHatching never goes true, so the game's own UI
+-- stays live and the hub keeps working throughout.
+--
+-- addPet is deliberately NOT called either. It looked harmless - "just
+-- show what you got" - but it is the rest of the animation: it binds a
+-- RenderStep (petPositions), spawns a model per pet into workspace.Debris
+-- and animates them in and out. At ~2 hatches/s x 23 pets that is ~46
+-- models spawning per second, and it is what you were still seeing.
+-- The pets are in the inventory either way.
+--
+-- isHatching() is reported as false while this is on, which is the
+-- honest answer: no animation is running.
+-- ------------------------------------------------------------------
+local SKIP_HATCH_ANIM = false
+local origPlayEggAnimation = nil
+local origIsHatching = nil
+
+local function restoreHatchAnimation()
+	if origPlayEggAnimation and HatchingController then
+		pcall(function()
+			HatchingController.playEggAnimation = origPlayEggAnimation
+		end)
+	end
+	if origIsHatching and HatchingController then
+		pcall(function()
+			HatchingController.isHatching = origIsHatching
+		end)
+	end
+	origPlayEggAnimation = nil
+	origIsHatching = nil
+	SKIP_HATCH_ANIM = false
+end
+
+local function installHatchAnimationSkip()
+	if SKIP_HATCH_ANIM or not HatchingController then
+		return
+	end
+	local hc = HatchingController
+	origPlayEggAnimation = hc.playEggAnimation
+	origIsHatching = hc.isHatching
+
+	hc.playEggAnimation = function(_self, _eggName, _pets, _amount, _opts)
+		-- nothing at all. The pets are already in the inventory from the
+		-- server, and drawing them is the animation we are removing.
+		-- Deliberately NOT: addPet, closeAllFrames, hideHUD, setVisible,
+		-- toggleTopPlayer, togglePetInfos, setCanOverrideDisplay,
+		-- toggleEggLuckCombo, _isHatching, the egg pool, and every wait.
+	end
+
+	hc.isHatching = function()
+		return false
+	end
+
+	-- An earlier version of this called addPet, which left the pet positions
+	-- RenderStep bound and _pets populated. Clear both, otherwise the models
+	-- keep floating around with nothing driving them out.
+	pcall(function()
+		RunService:UnbindFromRenderStep("petPositions")
+	end)
+	pcall(function()
+		hc._hasRenderStep = false
+	end)
+	pcall(function()
+		for id, entry in pairs(hc._pets or {}) do
+			if type(entry) == "table" and entry.instance then
+				pcall(function()
+					hc:cleanData(entry)
+				end)
+			end
+			hc._pets[id] = nil
+		end
+	end)
+
+	SKIP_HATCH_ANIM = true
+end
+
+-- With the animation gone nothing paces the hatch any more, so the loop can
+-- go as fast as the server actually answers instead of the animation's fixed
+-- 4.11/speed cycle. Measured on this account by firing openEgg at a fixed
+-- interval for 6s each and counting pets that landed (23 pets per batch
+-- hatch of "Basic"):
+--   1.00s -> 1.00 hatches/s ->  23.1 pets/s
+--   0.50s -> 1.32 hatches/s ->  30.4 pets/s
+--   0.25s -> 1.49 hatches/s ->  34.2 pets/s
+--   0.12s -> 1.67 hatches/s ->  38.4 pets/s
+--   0.05s -> 2.01 hatches/s ->  46.3 pets/s
+-- Past ~0.05s the curve is flat, so that is the server's own ceiling and
+-- going tighter only burns calls it ignores.
+local FAST_HATCH_INTERVAL = 0.05
+
+applyHatchInterval = function(t)
+	local base = 4.11 / ((t.hatchSpeed or 1))
+	t.cooldown = os.clock() + (SKIP_HATCH_ANIM and FAST_HATCH_INTERVAL or base)
+end
+
+bindPlainToggle(secGeneral, "SkipHatchAnimation", {
+	Title = "Remove hatch animation",
+	Description = "Skips the egg reveal entirely and leaves the game UI usable while hatching",
+	Default = true,
+	Callback = function(state)
+		if state == nil then
+			state = Options.SkipHatchAnimation and Options.SkipHatchAnimation.Value
+		end
+		if state then
+			installHatchAnimationSkip()
+		else
+			restoreHatchAnimation()
+		end
+	end,
+})
+
+secGeneral:AddButton({
+	Title = "Apply hatch speed",
+	Description = "Re-applies the current hatch interval (for when the animation toggle changes)",
+	Callback = function()
+		local t = Tasks.hatch
+		if t then
+			applyHatchInterval(t)
+		end
+		notify("Hatching", "Hatch interval: " .. tostring(SKIP_HATCH_ANIM and FAST_HATCH_INTERVAL or 4.11) .. "s")
+	end,
+})
+
+bindPlainToggle(secGeneral, "AutoSaveSettings", {
+	Title = "Auto save settings",
+	Description = "Writes every toggle and dropdown to disk every 30s and on exit",
+	Default = true,
+	Callback = function(state)
+		if state == nil then
+			state = Options.AutoSaveSettings and Options.AutoSaveSettings.Value
+		end
+		AUTOSAVE_ENABLED = state and true or false
+	end,
+})
+
+secGeneral:AddButton({
+	Title = "Save settings now",
+	Description = "Forces an immediate write of every setting",
+	Callback = function()
+		saveAllSettings()
+		notify("Settings", "Saved")
+	end,
+})
+
+secGeneral:AddButton({
+	Title = "Load settings",
+	Description = "Restores every setting from the last save",
+	Callback = function()
+		loadAllSettings()
+		notify("Settings", "Loaded")
+	end,
+})
+
+-- ------------------------------------------------------------------
+-- more themes
+--
+-- Fluent keeps its themes in a private table reachable only through
+-- Creator.GetThemeProperty's first upvalue, and Fluent:SetTheme silently
+-- no-ops on a name it does not know. So a new theme means registering the
+-- table there first, then SetTheme works by name. Verified: cloning Dark,
+-- renaming it, pushing it into Themes + Themes.Names, then SetTheme
+-- applies it and Fluent.Theme reports the new name.
+--
+-- Each theme is generated from a base so every key Fluent expects is
+-- present - a partial table leaves elements unpainted.
+-- ------------------------------------------------------------------
+local EXTRA_THEMES = {
+	{
+		name = "Ember",
+		accent = Color3.fromRGB(255, 122, 46),
+		element = Color3.fromRGB(255, 154, 92),
+		tab = Color3.fromRGB(214, 106, 52),
+		acrylicMain = Color3.fromRGB(40, 30, 28),
+		acrylicBorder = Color3.fromRGB(122, 74, 55),
+		dialog = Color3.fromRGB(120, 58, 36),
+		dropdownHolder = Color3.fromRGB(120, 58, 36),
+	},
+	{
+		name = "Toxic",
+		accent = Color3.fromRGB(154, 240, 62),
+		element = Color3.fromRGB(178, 245, 106),
+		tab = Color3.fromRGB(120, 190, 60),
+		acrylicMain = Color3.fromRGB(28, 36, 26),
+		acrylicBorder = Color3.fromRGB(90, 122, 60),
+		dialog = Color3.fromRGB(62, 110, 40),
+		dropdownHolder = Color3.fromRGB(62, 110, 40),
+	},
+	{
+		name = "Bloodmoon",
+		accent = Color3.fromRGB(226, 48, 48),
+		element = Color3.fromRGB(214, 92, 92),
+		tab = Color3.fromRGB(180, 48, 48),
+		acrylicMain = Color3.fromRGB(34, 22, 24),
+		acrylicBorder = Color3.fromRGB(110, 55, 55),
+		dialog = Color3.fromRGB(105, 34, 34),
+		dropdownHolder = Color3.fromRGB(105, 34, 34),
+	},
+	{
+		name = "Ice",
+		accent = Color3.fromRGB(150, 220, 255),
+		element = Color3.fromRGB(186, 232, 255),
+		tab = Color3.fromRGB(120, 180, 220),
+		acrylicMain = Color3.fromRGB(26, 32, 40),
+		acrylicBorder = Color3.fromRGB(70, 95, 118),
+		dialog = Color3.fromRGB(46, 78, 106),
+		dropdownHolder = Color3.fromRGB(46, 78, 106),
+	},
+	{
+		name = "Gold",
+		accent = Color3.fromRGB(255, 200, 60),
+		element = Color3.fromRGB(255, 219, 120),
+		tab = Color3.fromRGB(210, 165, 55),
+		acrylicMain = Color3.fromRGB(38, 34, 24),
+		acrylicBorder = Color3.fromRGB(126, 105, 55),
+		dialog = Color3.fromRGB(115, 90, 38),
+		dropdownHolder = Color3.fromRGB(115, 90, 38),
+	},
+	{
+		name = "Neon",
+		accent = Color3.fromRGB(255, 60, 220),
+		element = Color3.fromRGB(240, 130, 235),
+		tab = Color3.fromRGB(200, 60, 180),
+		acrylicMain = Color3.fromRGB(30, 22, 34),
+		acrylicBorder = Color3.fromRGB(105, 60, 110),
+		dialog = Color3.fromRGB(96, 38, 100),
+		dropdownHolder = Color3.fromRGB(96, 38, 100),
+	},
+	{
+		name = "Void",
+		accent = Color3.fromRGB(140, 120, 255),
+		element = Color3.fromRGB(170, 155, 250),
+		tab = Color3.fromRGB(110, 95, 210),
+		acrylicMain = Color3.fromRGB(22, 20, 32),
+		acrylicBorder = Color3.fromRGB(78, 70, 118),
+		dialog = Color3.fromRGB(58, 50, 100),
+		dropdownHolder = Color3.fromRGB(58, 50, 100),
+	},
+	{
+		name = "Mint",
+		accent = Color3.fromRGB(80, 230, 190),
+		element = Color3.fromRGB(130, 240, 214),
+		tab = Color3.fromRGB(70, 180, 155),
+		acrylicMain = Color3.fromRGB(24, 34, 32),
+		acrylicBorder = Color3.fromRGB(70, 110, 100),
+		dialog = Color3.fromRGB(38, 92, 82),
+		dropdownHolder = Color3.fromRGB(38, 92, 82),
+	},
+}
+
+-- Pull Fluent's internal theme registry out of Creator, which is the second
+-- upvalue of Fluent.SetTheme; GetThemeProperty's first upvalue is the table.
+local function fluentThemes()
+	local ok, creator = pcall(function()
+		return debug.getupvalues(Fluent.SetTheme)[2]
+	end)
+	if not ok or type(creator) ~= "table" then
+		return nil
+	end
+	local ok2, props = pcall(function()
+		return debug.getupvalues(creator.GetThemeProperty)[1]
+	end)
+	if not ok2 or type(props) ~= "table" or type(props.Names) ~= "table" then
+		return nil
+	end
+	return props
+end
+
+local function registerExtraThemes()
+	local props = fluentThemes()
+	if not props or type(props.Dark) ~= "table" then
+		return {}
+	end
+	local names = {}
+	for _, spec in ipairs(EXTRA_THEMES) do
+		if type(props[spec.name]) == "table" then
+			-- already registered by an earlier run
+		else
+			local t = {}
+			-- copy every key the base has, then override the coloured ones
+			for k, v in pairs(props.Dark) do
+				t[k] = v
+			end
+			t.Name = spec.name
+			t.Accent = spec.accent
+			t.Element = spec.element
+			t.Hover = spec.element
+			t.Input = spec.element
+			t.Keybind = spec.element
+			t.SliderRail = spec.element
+			t.ToggleSlider = spec.element
+			t.DropdownOption = spec.element
+			t.Tab = spec.tab
+			t.AcrylicMain = spec.acrylicMain
+			t.AcrylicBorder = spec.acrylicBorder
+			t.Dialog = spec.dialog
+			t.DialogButton = spec.dialog
+			t.DropdownHolder = spec.dropdownHolder
+			-- keep the gradients tinted to the accent, like the stock themes do
+			pcall(function()
+				t.AcrylicGradient = ColorSequence.new({
+					ColorSequenceKeypoint.new(0, spec.accent),
+					ColorSequenceKeypoint.new(1, spec.acrylicMain),
+				})
+			end)
+			props[spec.name] = t
+			props.Names[#props.Names + 1] = spec.name
+		end
+		names[#names + 1] = spec.name
+	end
+	return names
+end
+
+local EXTRA_THEME_NAMES = registerExtraThemes()
+do
+	local values = {}
+	for _, v in ipairs(Fluent.Themes) do
+		if type(v) == "string" then
+			values[#values + 1] = v
+		end
+	end
+	for _, n in ipairs(EXTRA_THEME_NAMES) do
+		local already = false
+		for _, v in ipairs(values) do
+			if v == n then
+				already = true
+				break
+			end
+		end
+		if not already then
+			values[#values + 1] = n
+		end
+	end
+	table.sort(values)
+	if #values > 0 then
+		local d = secGeneral:AddDropdown("ThemePick", {
+			Title = "Theme",
+			Description = "Includes extra themes registered on top of Fluent's own",
+			Default = values[1],
+			Values = values,
+			Callback = function(choice)
+				if type(choice) == "string" and choice ~= Fluent.Theme then
+					pcall(function()
+						Fluent:SetTheme(choice)
+					end)
+				end
+			end,
+		})
+		pcall(function()
+			Options.ThemePick = d
+		end)
+	end
+end
 
 local secSafety = section("Settings", "Safety", "shield")
 bindToggle(secSafety, { id = "AntiAfk", title = "Anti-AFK", desc = "Wiggles your character every ~25s when idle so you never get kicked", group = "Safety" }, "afk", antiAfkRunner, 5)
@@ -3622,11 +4470,12 @@ coroutine.wrap(function()
 			local cycle = okSpeed and speed and speed > 0 and string.format("%.2fs", 4.11 / speed) or "?"
 			eggStatus:SetDesc(
 				string.format(
-					"Egg: %s | in range: %s | hatching: %s | max hatch cycle: %s",
+					"Egg: %s | in range: %s | hatching: %s | cycle: %s | anim off: %s",
 					tostring(egg),
 					tostring(EggController and EggController._currentEgg == egg),
 					tostring(HatchingController and HatchingController:isHatching()),
-					cycle
+					SKIP_HATCH_ANIM and string.format("%.2fs", FAST_HATCH_INTERVAL) or cycle,
+					tostring(SKIP_HATCH_ANIM)
 				)
 			)
 
@@ -3681,6 +4530,15 @@ coroutine.wrap(function()
 					totalRakes(),
 					tostring(isRunning("rakeFarm")),
 					tostring(isRunning("rakeFarmUp"))
+				)
+			)
+
+			stage = "meteor"
+			local mt = Tasks.meteors
+			meteorStatus:SetDesc(
+				("Auto meteor: %s | %s"):format(
+					tostring(isRunning("meteors")),
+					(mt and mt.targetDesc) or "no meteor in range"
 				)
 			)
 
@@ -3766,6 +4624,11 @@ local function teardown()
 	stopped = true
 	stopAll()
 	table.clear(REGISTRY.tasks)
+	-- put the game's hatch animation back, or a reload would leave the
+	-- controller permanently replaced
+	pcall(restoreHatchAnimation)
+	-- write on the way out, so a clean stop never loses the settings
+	pcall(saveAllSettings)
 	pcall(function()
 		Fluent:Destroy()
 	end)
@@ -3784,6 +4647,34 @@ if SaveManager then
 		SaveManager:LoadAutoloadConfig()
 	end)
 end
+-- AutoloadConfig only handles SaveManager's own file. Our JSON backup covers
+-- the case where SaveManager was not there or its store was wiped.
+loadAllSettings()
+
+-- Fluent does not reliably fire a toggle's Callback for its Default value, so
+-- apply the two settings that patch game state explicitly. Doing it after the
+-- settings load means a restored preference wins over the default.
+pcall(function()
+	if Options.SkipHatchAnimation and Options.SkipHatchAnimation.Value then
+		installHatchAnimationSkip()
+	else
+		restoreHatchAnimation()
+	end
+end)
+pcall(function()
+	AUTOSAVE_ENABLED = not (Options.AutoSaveSettings and Options.AutoSaveSettings.Value == false)
+end)
+
+-- rolling save, so a crash or a disconnect loses at most one interval
+task.spawn(function()
+	while not stopped and not Fluent.Unloaded do
+		task.wait(AUTOSAVE_INTERVAL)
+		if stopped or Fluent.Unloaded then
+			break
+		end
+		saveAllSettings()
+	end
+end)
 
 Window:SelectTab(1)
 
