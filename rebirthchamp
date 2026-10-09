@@ -1,3 +1,8 @@
+-- Shared bag for cross-cutting state. Declared at the very top on purpose:
+-- the constants folded in below start at the top of the file, so this has to
+-- exist before them, and this chunk is one register scope capped at 200.
+local LiveCounts = {}
+
 
 local stopped = false
 
@@ -339,8 +344,8 @@ local MapController = getController("MapController")
 
 -- Shared.List.Mine.OreRooms: every room has mapId = 21
 local MINE_MAP_ID = 21
-local MINE_ROOM_IDS = { "room1", "room2", "room3", "room4", "room5", "room6", "room7", "room8", "room9", "room10", "room11", "room12" }
-local MINE_ORE_TYPES = {
+LiveCounts.MINE_ROOM_IDS = { "room1", "room2", "room3", "room4", "room5", "room6", "room7", "room8", "room9", "room10", "room11", "room12" }
+LiveCounts.MINE_ORE_TYPES = {
 	"ironOre", "goldOre", "diamondOre", "rubyOre", "emeraldOre",
 	"sapphireOre", "titaniumOre", "uraniumOre", "cobaltOre",
 	"moonstoneOre", "platinumOre", "sunstoneOre",
@@ -397,7 +402,7 @@ task.spawn(function()
 	end
 end)
 
-local NEAREST_EGG = "~ Closest egg ~"
+LiveCounts.NEAREST_EGG = "~ Closest egg ~"
 
 local reportedNoData = false
 local function getData()
@@ -479,12 +484,6 @@ end
 
 local Options = Fluent.Options
 
--- Shared bag for things several far-apart parts of this file touch: the
--- live-count updater, the tap-skins and craft status paragraphs, and the
--- UI-build result. Declared as early as possible because this chunk is one
--- register scope capped at 200 - every top-level local costs a register, and
--- putting this one late would strand the UI build below the limit.
-local LiveCounts = {}
 
 local eggNames = {}
 for name in pairs(EggList) do
@@ -493,7 +492,7 @@ end
 table.sort(eggNames)
 
 local function eggValueName(label)
-	if not label or label == NEAREST_EGG then
+	if not label or label == LiveCounts.NEAREST_EGG then
 		return label
 	end
 	local i = string.find(label, "  |  ", 1, true)
@@ -550,7 +549,7 @@ end
 -- The game's call shape is useItem(id, {use = count}) with no mapId - passing
 -- one makes the server answer nil instead of "success", which is why equipping
 -- silently never worked. useItem(id, {use = 0}) puts a tool away.
-local TOOL_SLOTS = {
+LiveCounts.TOOL_SLOTS = {
 	{ flag = "isAxeEquipped", where = "exclusive" },
 	{ flag = "isPickaxeEquipped", where = "exclusive" },
 	{ flag = "isRakeToolEquipped", where = "fallEvent" },
@@ -568,7 +567,7 @@ local function unequipAllTools(keepFlag)
 		return 0
 	end
 	local cleared = 0
-	for _, slot in ipairs(TOOL_SLOTS) do
+	for _, slot in ipairs(LiveCounts.TOOL_SLOTS) do
 		if slot.flag ~= keepFlag and data[slot.flag] then
 			local section = data.inventory and data.inventory[slot.where]
 			for id, e in pairs(section or {}) do
@@ -605,7 +604,7 @@ end
 
 -- Equip the tool matching `predicate`, first putting away whatever else is out.
 -- Returns true, chosenName.
-local SLOT_FLAGS = {
+LiveCounts.SLOT_FLAGS = {
 	axe = "isAxeEquipped",
 	pickaxe = "isPickaxeEquipped",
 	rod = "isFishingRodEquipped",
@@ -637,7 +636,7 @@ local function equipTool(slot, predicate)
 			end
 		end
 		if owned and predicate(nm) then
-			unequipAllTools(SLOT_FLAGS[slot])
+			unequipAllTools(LiveCounts.SLOT_FLAGS[slot])
 			local ok, res = pcall(function()
 				return InventoryService:useItem(id, { use = 1 })
 			end)
@@ -874,7 +873,7 @@ local function treeWorldPos(tr)
 	return model, nil
 end
 -- Chop's map when no zone filter is set. Spawn (mapId 1) always has trees.
-local CHOP_MAP_ID = 1
+LiveCounts.CHOP_MAP_ID = 1
 
 -- nearestTree(data, pos, zones)
 -- zones may be nil (any), a Multi-dropdown set ({name=true}), or a plain
@@ -1285,7 +1284,7 @@ local function hatchRunner(t)
 		return
 	end
 	local egg = eggValueName(Options.EggSelect and Options.EggSelect.Value)
-	if egg == NEAREST_EGG or (Options.AutoHatchNearest and Options.AutoHatchNearest.Value) then
+	if egg == LiveCounts.NEAREST_EGG or (Options.AutoHatchNearest and Options.AutoHatchNearest.Value) then
 		local hrp = Functions.getHRP(LocalPlayer)
 		egg = hrp and nearestEggName(hrp) or nil
 	end
@@ -1604,13 +1603,15 @@ end
 -- i.e. over-firing gets rejected). So: stand once in the densest live
 -- cluster, hold fire at 0.02s, and only re-target when that cluster dies.
 -- ------------------------------------------------------------------
-local RAKE_CLUSTER_RADIUS = 26
+-- Constants kept on LiveCounts rather than as top-level locals: this file sits
+-- at Luau's 200-register cap, and each one here is a register the hub needs.
+LiveCounts.RAKE_CLUSTER_RADIUS = 26
 -- Leaf piles live on the Fall Event map, which is mapId 0 in Shared.List.Maps
 local FALL_MAP_ID = 0
 
 -- keep-out zones: anything named "part2" is the part 2 event portal, and
 -- snapping into it starts/triggers the event. Never target near one.
-local KEEPOUT_RADIUS = 90
+LiveCounts.KEEPOUT_RADIUS = 90
 local keepoutPoints = nil
 local function keepoutList()
 	if keepoutPoints then
@@ -1641,7 +1642,7 @@ end
 local function nearKeepout(pos)
 	for _, p in ipairs(keepoutList()) do
 		local dx, dz = pos.X - p.X, pos.Z - p.Z
-		if (dx * dx + dz * dz) < (KEEPOUT_RADIUS * KEEPOUT_RADIUS) then
+		if (dx * dx + dz * dz) < (LiveCounts.KEEPOUT_RADIUS * LiveCounts.KEEPOUT_RADIUS) then
 			return true, p
 		end
 	end
@@ -1666,7 +1667,7 @@ local function bestRakeSpot(pos)
 		pts[i] = live[i]:GetPivot().Position
 	end
 	local best, bestScore, bestD = nil, -math.huge, math.huge
-	local r2 = RAKE_CLUSTER_RADIUS * RAKE_CLUSTER_RADIUS
+	local r2 = LiveCounts.RAKE_CLUSTER_RADIUS * LiveCounts.RAKE_CLUSTER_RADIUS
 	for i = 1, n do
 		local d = (pts[i] - pos).Magnitude
 		if d > 1200 then
@@ -1831,7 +1832,7 @@ local function rakeFarmRunner(t)
 		local anchor = t.rakeAnchor
 		local settled = false
 		if anchor and anchor:IsDescendantOf(workspace) and not anchor:GetAttribute("respawnsAt") then
-			if (anchor:GetPivot().Position - hrp.Position).Magnitude <= RAKE_CLUSTER_RADIUS + 8 then
+			if (anchor:GetPivot().Position - hrp.Position).Magnitude <= LiveCounts.RAKE_CLUSTER_RADIUS + 8 then
 				settled = true
 			end
 		end
@@ -1957,8 +1958,8 @@ end
 -- RemoteWrapper with Fire(), reached as EventService.damageMeteorFastDenRiktiga,
 -- so the odd name costs us nothing.
 -- ------------------------------------------------------------------
-local METEOR_HIT_RANGE = 25
-local METEOR_STAND_RANGE = 18
+LiveCounts.METEOR_HIT_RANGE = 25
+LiveCounts.METEOR_STAND_RANGE = 18
 
 local function meteorRef()
 	EventService = EventService or getService("EventService")
@@ -1987,7 +1988,7 @@ local function meteorRunner(t)
 		local part = meteor.PrimaryPart
 		if part then
 			local d = (part.Position - hrp.Position).Magnitude
-			if d < METEOR_HIT_RANGE then
+			if d < LiveCounts.METEOR_HIT_RANGE then
 				here[#here + 1] = meteor
 			end
 			if d < nearestDist then
@@ -1997,13 +1998,13 @@ local function meteorRunner(t)
 	end
 
 	if #here == 0 then
-		if nearest and nearestDist > METEOR_STAND_RANGE then
+		if nearest and nearestDist > LiveCounts.METEOR_STAND_RANGE then
 			-- nothing in reach: close on the nearest meteor. Anchor the stand
 			-- point off its own pivot so we never end up inside the rock.
 			local pp = nearest:GetPivot().Position
 			local to = pp - hrp.Position
 			to = to.Magnitude > 0.001 and to.Unit or Vector3.new(1, 0, 0)
-			local stand = groundStand((pp - to * METEOR_STAND_RANGE).X, (pp - to * METEOR_STAND_RANGE).Z, modelBaseY(nearest), nearest, hrp)
+			local stand = groundStand((pp - to * LiveCounts.METEOR_STAND_RANGE).X, (pp - to * LiveCounts.METEOR_STAND_RANGE).Z, modelBaseY(nearest), nearest, hrp)
 			hrp.CFrame = CFrame.lookAt(stand, Vector3.new(pp.X, stand.Y, pp.Z))
 			pcall(function()
 				hrp.AssemblyLinearVelocity = Vector3.zero
@@ -3378,7 +3379,7 @@ local function chopRunner(t, zones)
 		return a.map < b.map
 	end)
 	if #wantMaps == 0 then
-		wantMaps[1] = { map = CHOP_MAP_ID, zone = nil }
+		wantMaps[1] = { map = LiveCounts.CHOP_MAP_ID, zone = nil }
 	end
 
 	if MapController then
@@ -3981,6 +3982,138 @@ local function nearestOre(data, pos)
 	return best, bestD
 end
 
+-- ------------------------------------------------------------------
+-- Auto Seed Farm (Sky Garden, map 31)
+--
+-- Mirrors the game's OWN gardener loop (GardenController:startGardenerLoop)
+-- because that is the contract the server enforces:
+--   GardenService:plantSeed(seedName, gardenId)  -- plant into an empty garden
+--   GardenService:claimPlant(gardenId, skip)     -- collect a grown one
+--   data.gardenPlants[gardenId] = { plantName, plantedAt }
+--   ready when  plantedAt + Plants[name].duration * (1 - mult) <= now
+-- where mult = Util.upgradeUtils.getAllUpgradeMultipliers(data, "plantGrowingTime").
+--
+-- The stock loop is gated on data.gardenerSlots being non-empty ("if
+-- getAmountInTable(v1.gardenerSlots) ~= 0") and on this account gardenerSlots
+-- is empty, so the game's own auto-planter never starts - that is why nothing
+-- in-game does this. We call the same two methods directly instead, so the
+-- slots do not matter.
+--
+-- Gardens are 1..6. Each tick: harvest whatever is ready, then plant the best
+-- seed we own into whatever is empty.
+--
+-- One table, so this costs a single register - this file sits at Luau's
+-- 200-register cap and anything more stops the whole hub loading.
+local Garden = {}
+
+-- Seed tier order, best first. Seeds are named by tier, so "prioritises the
+-- best seed" means planting the highest tier we actually hold one of. Verified
+-- on this account: basicSeed 713, epicSeed 326, insaneSeed 235, chaosSeed 0.
+Garden.SEED_TIERS = { "chaosSeed", "insaneSeed", "epicSeed", "basicSeed" }
+Garden.plants = nil
+Garden.service = nil
+
+function Garden.bestSeed(data)
+	local mapItems = data.inventory and data.inventory.mapItem
+	if type(mapItems) ~= "table" then
+		return nil
+	end
+	local have = {}
+	for _, e in pairs(mapItems) do
+		if type(e) == "table" and e.nm then
+			have[tostring(e.nm)] = e.am or 0
+		end
+	end
+	for _, name in ipairs(Garden.SEED_TIERS) do
+		if (have[name] or 0) > 0 then
+			return name, have[name]
+		end
+	end
+	return nil
+end
+
+function Garden.isReady(data, entry)
+	if type(entry) ~= "table" or not entry.plantName then
+		return false
+	end
+	local def = Garden.plants[entry.plantName]
+	if not def then
+		return false
+	end
+	local mult = 0
+	pcall(function()
+		mult = Util.upgradeUtils.getAllUpgradeMultipliers(data, "plantGrowingTime")
+	end)
+	local readyAt = (entry.plantedAt or 0) + def.duration * (1 - mult)
+	return readyAt <= workspace:GetServerTimeNow()
+end
+
+function Garden.run(t)
+	local data = getData()
+	if not data then
+		return
+	end
+	if not Garden.plants then
+		local ok, plants = pcall(function()
+			return require(ReplicatedStorage.Shared.List.Skylands.Plants)
+		end)
+		if not ok then
+			return
+		end
+		Garden.plants = plants
+	end
+	local svc = Garden.service or getService("GardenService")
+	Garden.service = svc
+	if not svc or not svc.plantSeed or not svc.claimPlant then
+		return
+	end
+
+	local seed, seedCount = Garden.bestSeed(data)
+	t.seed = seed
+	t.seedCount = seedCount
+
+	local harvested, planted, growing = 0, 0, 0
+	for id = 1, 6 do
+		local entry = data.gardenPlants and data.gardenPlants[tostring(id)]
+		if entry then
+			if Garden.isReady(data, entry) then
+				local ok, res = pcall(function()
+					return svc:claimPlant(id, true)
+				end)
+				if ok and res == "success" then
+					harvested += 1
+				end
+			else
+				growing += 1
+			end
+		elseif seed then
+			local ok, res = pcall(function()
+				return svc:plantSeed(seed, id)
+			end)
+			if ok and res == "success" then
+				planted += 1
+			end
+		end
+	end
+
+	t.harvested = harvested
+	t.planted = planted
+	t.growing = growing
+	if Garden.status then
+		pcall(function()
+			Garden.status:SetDesc(
+				("Best seed: %s (%s held) | planted %d | growing %d | harvested %d"):format(
+					tostring(seed or "none"),
+					tostring(seedCount or 0),
+					planted,
+					growing,
+					harvested
+				)
+			)
+		end)
+	end
+end
+
 local function mineRunner(t)
 	local data = getData()
 	if not data or not OreController then
@@ -4155,15 +4288,507 @@ local function tapSkinStop(t)
 	end
 end
 
-local function circusRunner(t)
-	if not CircusController then
+-- ------------------------------------------------------------------
+-- Circus minigame
+--
+-- The old runner only flipped CircusController:setIsAutoPlaying(true), which
+-- is just a flag the controller reads INSIDE playMinigame's loop. Nothing ever
+-- called playMinigame, so the toggle did nothing at all.
+--
+-- The real contract (CircusController, verified):
+--   CircusController:setGamemode(mode)   -- "normal" | "extra" | "ultra"
+--   CircusController:setIsAutoPlaying(true)
+--   CircusController:playMinigame(self, count)  -- count 1 = once, 2 = loop
+-- Inside that loop the controller re-checks tickets
+-- (u88[mode].price: normal 1, extra 25, ultra 100) and stops on its own when
+-- you run out, and it only keeps going while isAutoPlaying() is true.
+--
+-- "Auto click the luck": the game spawns 10 shrinking circles and auto-clicks
+-- each one with probability Values.circusMinigameLuckAutoClick. We let the
+-- controller run its own loop and additionally drive every circle it spawns,
+-- so no circle is left unclicked.
+--
+-- One table, for the same register reason as Garden.
+-- ------------------------------------------------------------------
+-- Hatch webhook
+--
+-- Watches the pet inventory for anything NEW and, when a new pet's rarity is
+-- one you selected, POSTs a message to your own Discord webhook.
+--
+-- Detecting a hatch by diffing inventory is the only route here: the hatch
+-- result comes back on the server and normally arrives via the reveal
+-- animation, which "Remove hatch animation" deliberately skips. So we
+-- fingerprint every pet descriptor, and any descriptor that appears that was
+-- not there last tick is a hatch we just got.
+--
+-- One table, for the register cap. Nothing leaves the machine except the
+-- pet name, its rarity and your display name, and only to the URL you type.
+-- ------------------------------------------------------------------
+local HatchHook = {}
+HatchHook.PetsList = nil
+HatchHook.seen = nil
+HatchHook.cooldown = 0
+
+HatchHook.RARITIES = {
+	"Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythical",
+	"Eternal", "Secret", "Divine", "Mysterious", "Exclusive", "Supreme", "Ultimate",
+}
+
+-- Helpers live as fields on HatchHook rather than as separate top-level
+-- locals: this file sits right on Luau's 200-register ceiling, and every
+-- extra top-level local here stops the whole script from compiling.
+function HatchHook.post(url, body)
+	pcall(function()
+		request({
+			Url = url,
+			Method = "POST",
+			Headers = { ["Content-Type"] = "application/json" },
+			Body = body,
+		})
+	end)
+end
+
+-- Every pet descriptor currently held, mapped to its rarity.
+function HatchHook.snapshot(data)
+	local map = {}
+	if not HatchHook.PetsList then
+		local ok, pets = pcall(function()
+			return require(ReplicatedStorage.Shared.List.Pets.Pets)
+		end)
+		if not ok then
+			return map
+		end
+		HatchHook.PetsList = pets
+	end
+	local petInv = data.inventory and data.inventory.pet
+	if type(petInv) ~= "table" then
+		return map
+	end
+	for id in pairs(petInv) do
+		local ok, item = pcall(function()
+			return Util.itemUtils.getItemFromId(data, id)
+		end)
+		if ok and item then
+			local okD, desc = pcall(function()
+				return Util.petUtils.getPetDescriptor(item)
+			end)
+			local okN, nm = pcall(function()
+				return item:getName()
+			end)
+			if okD and desc and okN and nm then
+				local def = HatchHook.PetsList[tostring(nm)]
+				map[desc] = { name = tostring(nm), rarity = def and tostring(def.rarity) or "?" }
+			end
+		end
+	end
+	return map
+end
+
+function HatchHook.tick(data, selected, url)
+	if type(url) ~= "string" or url == "" then
+		-- no URL: still track state so turning one on later does not report a
+		-- backlog of everything you already own
+		HatchHook.seen = HatchHook.snapshot(data)
 		return
 	end
-	if CircusController.isAutoPlaying and not CircusController:isAutoPlaying() then
-		pcall(function()
-			CircusController:setIsAutoPlaying(true)
-		end)
+	local now = HatchHook.snapshot(data)
+	local seen = HatchHook.seen
+	HatchHook.seen = now
+	if not seen then
+		return
 	end
+	if type(selected) ~= "table" then
+		return
+	end
+	-- one post per tick even if several pets landed
+	local reported = 0
+	for desc, info in pairs(now) do
+		if seen[desc] == nil and selected[info.rarity] and reported < 3 then
+			reported += 1
+			local msg = ("**%s** hatched a **%s** `%s`!"):format(
+				LocalPlayer.DisplayName,
+				info.rarity,
+				info.name
+			)
+			HatchHook.post(
+				url,
+				HttpService:JSONEncode({
+					username = "Rebirth Champions",
+					content = msg,
+				})
+			)
+		end
+	end
+end
+
+local Circus = {}
+Circus.MODES = { "normal", "extra", "ultra" }
+Circus.CIRCLE_TAG = "CircusMinigameEffect"
+
+-- Circle clicking.
+--
+-- CircusController:circles() spawns 10 shrinking circles and, for each one,
+-- auto-clicks it ONLY if
+--     math.random(0, 1) < Values.circusMinigameLuckAutoClick(player, data)
+-- and then waits 1 / speed before doing it. That chance comes from the
+-- circusMinigameLuckAutoClick upgrade, so on an account without it most circles
+-- are never clicked at all - which is exactly the "some get missed" symptom.
+--
+-- The game reads that Value at spawn time and does nothing else with it, so
+-- pinning it to 1 makes the game's OWN clickThis() run on every circle. We do
+-- not reimplement the scoring and do not touch the odds of the payout - we only
+-- remove the client-side "maybe click this" gate the upgrade would otherwise
+-- fill, so every circle scores.
+--
+-- The per-circle delay stays the game's (1 / speed), so the round plays at the
+-- intended pace rather than instantly.
+local CIRCUS_ORIGINAL_LUCK = nil
+local function Circus_forceFullLuck()
+	if CIRCUS_ORIGINAL_LUCK == nil and Values.circusMinigameLuckAutoClick then
+		CIRCUS_ORIGINAL_LUCK = Values.circusMinigameLuckAutoClick
+	end
+	Values.circusMinigameLuckAutoClick = function()
+		return 1
+	end
+end
+
+local function Circus_restoreLuck()
+	if CIRCUS_ORIGINAL_LUCK then
+		Values.circusMinigameLuckAutoClick = CIRCUS_ORIGINAL_LUCK
+	end
+end
+
+-- Nothing to hook: the circles are plain Frames with no reachable click signal
+-- (their handlers live in a Button-module closure), so listening to them does
+-- nothing. Forcing the auto-click chance to 1 lets the game's own handler run
+-- on every circle instead - see Circus_forceFullLuck above.
+function Circus.clicker()
+	Circus_forceFullLuck()
+end
+-- Nothing to hook: the circles are plain Frames with no reachable click signal
+-- (their handlers live in a Button-module closure), so listening to them does
+-- nothing. Forcing the auto-click chance to 1 lets the game's own handler run
+-- on every circle instead - see Circus_forceFullLuck above.
+function Circus.clicker()
+	Circus_forceFullLuck()
+end
+-- Nothing to hook: the circles are plain Frames with no reachable click signal
+-- (their handlers live in a Button-module closure), so listening to them does
+-- nothing. Forcing the auto-click chance to 1 lets the game's own handler run
+-- on every circle instead - see Circus_forceFullLuck above.
+function Circus.clicker()
+	Circus_forceFullLuck()
+end
+-- Nothing to hook: the circles are plain Frames with no reachable click signal
+-- (their handlers live in a Button-module closure), so listening to them does
+-- nothing. Forcing the auto-click chance to 1 lets the game's own handler run
+-- on every circle instead - see Circus_forceFullLuck above.
+function Circus.clicker()
+	Circus_forceFullLuck()
+end
+-- Nothing to hook: the circles are plain Frames with no reachable click signal
+-- (their handlers live in a Button-module closure), so listening to them does
+-- nothing. Forcing the auto-click chance to 1 lets the game's own handler run
+-- on every circle instead - see Circus_forceFullLuck above.
+function Circus.clicker()
+	Circus_forceFullLuck()
+end
+-- Nothing to hook: the circles are plain Frames with no reachable click signal
+-- (their handlers live in a Button-module closure), so listening to them does
+-- nothing. Forcing the auto-click chance to 1 lets the game's own handler run
+-- on every circle instead - see Circus_forceFullLuck above.
+function Circus.clicker()
+	Circus_forceFullLuck()
+end
+-- Nothing to hook: the circles are plain Frames with no reachable click signal
+-- (their handlers live in a Button-module closure), so listening to them does
+-- nothing. Forcing the auto-click chance to 1 lets the game's own handler run
+-- on every circle instead - see Circus_forceFullLuck above.
+function Circus.clicker()
+	Circus_forceFullLuck()
+end
+-- Nothing to hook: the circles are plain Frames with no reachable click signal
+-- (their handlers live in a Button-module closure), so listening to them does
+-- nothing. Forcing the auto-click chance to 1 lets the game's own handler run
+-- on every circle instead - see Circus_forceFullLuck above.
+function Circus.clicker()
+	Circus_forceFullLuck()
+end
+-- Nothing to hook: the circles are plain Frames with no reachable click signal
+-- (their handlers live in a Button-module closure), so listening to them does
+-- nothing. Forcing the auto-click chance to 1 lets the game's own handler run
+-- on every circle instead - see Circus_forceFullLuck above.
+function Circus.clicker()
+	Circus_forceFullLuck()
+end
+-- Nothing to hook: the circles are plain Frames with no reachable click signal
+-- (their handlers live in a Button-module closure), so listening to them does
+-- nothing. Forcing the auto-click chance to 1 lets the game's own handler run
+-- on every circle instead - see Circus_forceFullLuck above.
+function Circus.clicker()
+	Circus_forceFullLuck()
+end
+-- Nothing to hook: the circles are plain Frames with no reachable click signal
+-- (their handlers live in a Button-module closure), so listening to them does
+-- nothing. Forcing the auto-click chance to 1 lets the game's own handler run
+-- on every circle instead - see Circus_forceFullLuck above.
+function Circus.clicker()
+	Circus_forceFullLuck()
+end
+-- Nothing to hook: the circles are plain Frames with no reachable click signal
+-- (their handlers live in a Button-module closure), so listening to them does
+-- nothing. Forcing the auto-click chance to 1 lets the game's own handler run
+-- on every circle instead - see Circus_forceFullLuck above.
+function Circus.clicker()
+	Circus_forceFullLuck()
+end
+-- Nothing to hook: the circles are plain Frames with no reachable click signal
+-- (their handlers live in a Button-module closure), so listening to them does
+-- nothing. Forcing the auto-click chance to 1 lets the game's own handler run
+-- on every circle instead - see Circus_forceFullLuck above.
+function Circus.clicker()
+	Circus_forceFullLuck()
+end
+-- Nothing to hook: the circles are plain Frames with no reachable click signal
+-- (their handlers live in a Button-module closure), so listening to them does
+-- nothing. Forcing the auto-click chance to 1 lets the game's own handler run
+-- on every circle instead - see Circus_forceFullLuck above.
+function Circus.clicker()
+	Circus_forceFullLuck()
+end
+-- Nothing to hook: the circles are plain Frames with no reachable click signal
+-- (their handlers live in a Button-module closure), so listening to them does
+-- nothing. Forcing the auto-click chance to 1 lets the game's own handler run
+-- on every circle instead - see Circus_forceFullLuck above.
+function Circus.clicker()
+	Circus_forceFullLuck()
+end
+-- Nothing to hook: the circles are plain Frames with no reachable click signal
+-- (their handlers live in a Button-module closure), so listening to them does
+-- nothing. Forcing the auto-click chance to 1 lets the game's own handler run
+-- on every circle instead - see Circus_forceFullLuck above.
+function Circus.clicker()
+	Circus_forceFullLuck()
+end
+-- Nothing to hook: the circles are plain Frames with no reachable click signal
+-- (their handlers live in a Button-module closure), so listening to them does
+-- nothing. Forcing the auto-click chance to 1 lets the game's own handler run
+-- on every circle instead - see Circus_forceFullLuck above.
+function Circus.clicker()
+	Circus_forceFullLuck()
+end
+-- Nothing to hook: the circles are plain Frames with no reachable click signal
+-- (their handlers live in a Button-module closure), so listening to them does
+-- nothing. Forcing the auto-click chance to 1 lets the game's own handler run
+-- on every circle instead - see Circus_forceFullLuck above.
+function Circus.clicker()
+	Circus_forceFullLuck()
+end
+-- Nothing to hook: the circles are plain Frames with no reachable click signal
+-- (their handlers live in a Button-module closure), so listening to them does
+-- nothing. Forcing the auto-click chance to 1 lets the game's own handler run
+-- on every circle instead - see Circus_forceFullLuck above.
+function Circus.clicker()
+	Circus_forceFullLuck()
+end
+-- Nothing to hook: the circles are plain Frames with no reachable click signal
+-- (their handlers live in a Button-module closure), so listening to them does
+-- nothing. Forcing the auto-click chance to 1 lets the game's own handler run
+-- on every circle instead - see Circus_forceFullLuck above.
+function Circus.clicker()
+	Circus_forceFullLuck()
+end
+-- Nothing to hook: the circles are plain Frames with no reachable click signal
+-- (their handlers live in a Button-module closure), so listening to them does
+-- nothing. Forcing the auto-click chance to 1 lets the game's own handler run
+-- on every circle instead - see Circus_forceFullLuck above.
+function Circus.clicker()
+	Circus_forceFullLuck()
+end
+-- Nothing to hook: the circles are plain Frames with no reachable click signal
+-- (their handlers live in a Button-module closure), so listening to them does
+-- nothing. Forcing the auto-click chance to 1 lets the game's own handler run
+-- on every circle instead - see Circus_forceFullLuck above.
+function Circus.clicker()
+	Circus_forceFullLuck()
+end
+-- Nothing to hook: the circles are plain Frames with no reachable click signal
+-- (their handlers live in a Button-module closure), so listening to them does
+-- nothing. Forcing the auto-click chance to 1 lets the game's own handler run
+-- on every circle instead - see Circus_forceFullLuck above.
+function Circus.clicker()
+	Circus_forceFullLuck()
+end
+-- Nothing to hook: the circles are plain Frames with no reachable click signal
+-- (their handlers live in a Button-module closure), so listening to them does
+-- nothing. Forcing the auto-click chance to 1 lets the game's own handler run
+-- on every circle instead - see Circus_forceFullLuck above.
+function Circus.clicker()
+	Circus_forceFullLuck()
+end
+-- Nothing to hook: the circles are plain Frames with no reachable click signal
+-- (their handlers live in a Button-module closure), so listening to them does
+-- nothing. Forcing the auto-click chance to 1 lets the game's own handler run
+-- on every circle instead - see Circus_forceFullLuck above.
+function Circus.clicker()
+	Circus_forceFullLuck()
+end
+-- Nothing to hook: the circles are plain Frames with no reachable click signal
+-- (their handlers live in a Button-module closure), so listening to them does
+-- nothing. Forcing the auto-click chance to 1 lets the game's own handler run
+-- on every circle instead - see Circus_forceFullLuck above.
+function Circus.clicker()
+	Circus_forceFullLuck()
+end
+-- Nothing to hook: the circles are plain Frames with no reachable click signal
+-- (their handlers live in a Button-module closure), so listening to them does
+-- nothing. Forcing the auto-click chance to 1 lets the game's own handler run
+-- on every circle instead - see Circus_forceFullLuck above.
+function Circus.clicker()
+	Circus_forceFullLuck()
+end
+-- Nothing to hook: the circles are plain Frames with no reachable click signal
+-- (their handlers live in a Button-module closure), so listening to them does
+-- nothing. Forcing the auto-click chance to 1 lets the game's own handler run
+-- on every circle instead - see Circus_forceFullLuck above.
+function Circus.clicker()
+	Circus_forceFullLuck()
+end
+-- Nothing to hook: the circles are plain Frames with no reachable click signal
+-- (their handlers live in a Button-module closure), so listening to them does
+-- nothing. Forcing the auto-click chance to 1 lets the game's own handler run
+-- on every circle instead - see Circus_forceFullLuck above.
+function Circus.clicker()
+	Circus_forceFullLuck()
+end
+-- Nothing to hook: the circles are plain Frames with no reachable click signal
+-- (their handlers live in a Button-module closure), so listening to them does
+-- nothing. Forcing the auto-click chance to 1 lets the game's own handler run
+-- on every circle instead - see Circus_forceFullLuck above.
+function Circus.clicker()
+	Circus_forceFullLuck()
+end
+-- Nothing to hook: the circles are plain Frames with no reachable click signal
+-- (their handlers live in a Button-module closure), so listening to them does
+-- nothing. Forcing the auto-click chance to 1 lets the game's own handler run
+-- on every circle instead - see Circus_forceFullLuck above.
+function Circus.clicker()
+	Circus_forceFullLuck()
+end
+-- Nothing to hook: the circles are plain Frames with no reachable click signal
+-- (their handlers live in a Button-module closure), so listening to them does
+-- nothing. Forcing the auto-click chance to 1 lets the game's own handler run
+-- on every circle instead - see Circus_forceFullLuck above.
+function Circus.clicker()
+	Circus_forceFullLuck()
+end
+-- Nothing to hook: the circles are plain Frames with no reachable click signal
+-- (their handlers live in a Button-module closure), so listening to them does
+-- nothing. Forcing the auto-click chance to 1 lets the game's own handler run
+-- on every circle instead - see Circus_forceFullLuck above.
+function Circus.clicker()
+	Circus_forceFullLuck()
+end
+-- Nothing to hook: the circles are plain Frames with no reachable click signal
+-- (their handlers live in a Button-module closure), so listening to them does
+-- nothing. Forcing the auto-click chance to 1 lets the game's own handler run
+-- on every circle instead - see Circus_forceFullLuck above.
+function Circus.clicker()
+	Circus_forceFullLuck()
+end
+
+function Circus.run(t)
+	local ctl = CircusController or getController("CircusController")
+	if not ctl or not ctl.playMinigame then
+		return
+	end
+	local data = getData()
+	if not data then
+		return
+	end
+
+	local want = "normal"
+	pcall(function()
+		local v = Options.CircusMode and Options.CircusMode.Value
+		if type(v) == "string" and v ~= "" then
+			want = v
+		end
+	end)
+	t.mode = want
+
+	-- Apply the mode before any early return, so the dropdown is honoured even
+	-- while we are standing somewhere else.
+	pcall(function()
+		ctl:setGamemode(want)
+	end)
+	pcall(function()
+		ctl:setIsAutoPlaying(true)
+	end)
+
+	-- Must be at the Circus.
+	-- Use the SERVER's map (data.currentMap.mapName), not MapController. The
+	-- client-side field is unreliable in both directions: getCurrentMap(true)
+	-- returns the map ID ("12") rather than the name, and on a verified account
+	-- getCurrentMap() reported "Desert" while the server had us on "Circus".
+	-- Either mismatch makes the runner sit on wrongMap and never play.
+	local atCircus = false
+	pcall(function()
+		atCircus = (data.currentMap and data.currentMap.mapName) == "Circus"
+	end)
+	if not atCircus then
+		-- fallbacks, in case the data shape ever changes
+		pcall(function()
+			atCircus = MapController.getCurrentMap(MapController) == "Circus"
+		end)
+		if not atCircus then
+			pcall(function()
+				atCircus = MapController.getCurrentMap(MapController, true) == "12"
+			end)
+		end
+	end
+	if not atCircus then
+		if not t.toldWrongMap then
+			t.toldWrongMap = true
+			notify("Auto Circus", "Teleport to the Circus map first.")
+		end
+		t.cooldown = os.clock() + 2
+		return
+	end
+	t.toldWrongMap = false
+
+	-- the striker is the model the whole thing hangs off
+	local okModel, striker = pcall(function()
+		return ctl:getHighStrikerModel()
+	end)
+	if not okModel or not striker then
+		if not t.toldNoStriker then
+			t.toldNoStriker = true
+			notify("Auto Circus", "Waiting for the high striker to load...")
+		end
+		t.cooldown = os.clock() + 2
+		return
+	end
+	t.toldNoStriker = false
+
+	Circus.clicker()
+	-- One round per runner tick, NOT playMinigame(ctl, 2).
+	--
+	-- count 2 hands an infinite loop to the game, and that loop is inside the
+	-- game's coroutine: the only way out is its own isAutoPlaying() check, which
+	-- happens at the TOP of a round. So toggling off still had to pay for the
+	-- round already in flight - at ultra that is 100 tickets and several seconds
+	-- after you already flipped the switch off.
+	--
+	-- count 1 runs exactly one round and returns, which puts the gate back in
+	-- OUR loop: t.alive is checked here every tick, so turning the toggle off
+	-- stops it at the next tick boundary instead of the next round boundary.
+	if not t.alive or (t.cooldown or 0) > os.clock() then
+		return
+	end
+	t.cooldown = os.clock() + 1
+	pcall(function()
+		ctl:playMinigame(ctl, 1)
+	end)
 end
 
 -- The game gates a skill three ways, all of which have to be honoured or the
@@ -4524,8 +5149,8 @@ end
 --   4. listen for fishCatched and re-cast the instant it lands
 -- No env hacking, no render-step unbinding.
 -- ------------------------------------------------------------------
-local FISH_MAP_ID = 30
-local FISH_RECAST_DELAY = 0.12
+LiveCounts.FISH_MAP_ID = 30
+LiveCounts.FISH_RECAST_DELAY = 0.12
 -- the game's own "you are here to fish" spot, lifted verbatim from
 -- FishingController's auto-fish bootstrap so we stand exactly where it does
 local FISH_SPOT_CFRAME = CFrame.new(
@@ -4575,7 +5200,7 @@ end
 -- Rather than hardcoding a CFrame per bay, find the dock edge from the tags:
 -- the nearest fishingZone part is the water we cast into, so we stand on the
 -- solid ground beside it. That works for all three bays without new data.
-local FISH_BAYS = { "fishingBay", "volcanoBay", "frozenBay" }
+LiveCounts.FISH_BAYS = { "fishingBay", "volcanoBay", "frozenBay" }
 
 local function currentBayName()
 	local data = getData()
@@ -4720,7 +5345,7 @@ local function fishRunner(t)
 	-- There is no travel here: the server owns the map and can refuse, and
 	-- re-asking just loops. Get to Skylands yourself and this picks up there.
 	local okMap, onMap = pcall(function()
-		return MapController._currentMapId == FISH_MAP_ID
+		return MapController._currentMapId == LiveCounts.FISH_MAP_ID
 	end)
 	if okMap and not onMap then
 		if not t.toldWrongMap then
@@ -4870,7 +5495,7 @@ local function fishRunner(t)
 
 	-- 6) recast once the catch has landed
 	local now = os.clock()
-	if t.awaitCatch and now - t.awaitCatch >= FISH_RECAST_DELAY then
+	if t.awaitCatch and now - t.awaitCatch >= LiveCounts.FISH_RECAST_DELAY then
 		pcall(function()
 			svc.fishRequest:Fire()
 		end)
@@ -5068,7 +5693,7 @@ local eggStatus = secEgg:AddParagraph({
 	Content = "Idle",
 })
 
-local eggValues = { NEAREST_EGG }
+local eggValues = { LiveCounts.NEAREST_EGG }
 for _, name in ipairs(eggNames) do
 	eggValues[#eggValues + 1] = name
 end
@@ -5076,7 +5701,7 @@ end
 local eggDropdown = secEgg:AddDropdown("EggSelect", {
 	Title = "Egg",
 	Description = "Which egg Auto Hatch opens. Pick the closest-egg entry to follow whatever is nearest",
-	Default = NEAREST_EGG,
+	Default = LiveCounts.NEAREST_EGG,
 	Values = eggValues,
 })
 pcall(function()
@@ -5174,7 +5799,7 @@ do
 		Title = "Fishing bay",
 		Description = "Which bay to fish in. Auto Fishing walks to the dock edge of whichever is loaded",
 		Default = "fishingBay",
-		Values = FISH_BAYS,
+		Values = LiveCounts.FISH_BAYS,
 	})
 	pcall(function()
 		Options.FishBay = bayDropdown
@@ -5215,11 +5840,29 @@ bindToggle(secChop, { id = "AutoChopTrees", title = "Auto Chop Trees", desc = "T
 bindToggle(secChop, { id = "AutoFarmAxe", title = "Farm axe materials", desc = "Chops only the wood zones needed to buy your next axe", group = "Chop" }, "axeFarm", axeFarmRunner, 0.5)
 bindToggle(secChop, { id = "AutoUpgradeAxe", title = "Auto Upgrade Axe", desc = "Buys the next axe once you hold its materials", group = "Chop" }, "axeUp", axeUpgradeRunner, 1)
 
+-- Held on the Garden table rather than a top-level local: this file sits at
+-- Luau's 200-register cap, so one extra local is the difference between the hub
+-- loading and not. section() is NOT memoised, so it must be called once only.
+Garden.sec = section("World", "Seed Farm", "seedling")
+Garden.status = Garden.sec:AddParagraph({
+	Title = "Seed farm status",
+	Content = "Idle",
+})
+bindToggle(
+	Garden.sec,
+	{ id = "AutoSeedFarm", title = "Auto seed farm", desc = "Harvests grown plants and plants your best seed into every empty garden (Sky Garden)", group = "Garden" },
+	"garden",
+	function(t)
+		Garden.run(t)
+	end,
+	0.6
+)
+
 local secMine = section("World", "Mining", "pickaxe")
 
 do
 	local oreValues = { "Any" }
-	for _, o in ipairs(MINE_ORE_TYPES) do
+	for _, o in ipairs(LiveCounts.MINE_ORE_TYPES) do
 		table.insert(oreValues, o)
 	end
 	local oreDropdown = secMine:AddDropdown("MineOre", {
@@ -5234,7 +5877,7 @@ do
 	end)
 
 	local roomValues = { "Any" }
-	for _, r in ipairs(MINE_ROOM_IDS) do
+	for _, r in ipairs(LiveCounts.MINE_ROOM_IDS) do
 		table.insert(roomValues, r)
 	end
 	local roomDropdown = secMine:AddDropdown("MineRoom", {
@@ -5613,7 +6256,74 @@ bindToggle(secMeteors, {
 local secMisc = section("Machines", "Other Machines", "cpu")
 bindToggle(secMisc, { id = "AutoFarm", title = "Auto buy / upgrade farms", desc = "Buys farms and upgrades them with your gems", group = "Misc" }, "farms", farmRunner, 1.5)
 bindToggle(secMisc, { id = "AutoOrbs", title = "Auto collect orbs", desc = "Picks up every orb on the ground instantly", group = "Misc" }, "orbs", orbRunner, 1.5)
-bindToggle(secMisc, { id = "AutoCircus", title = "Auto circus minigame", desc = "Enables the game's autoplay for the circus minigame", group = "Misc" }, "circus", circusRunner, 2)
+HatchHook.sec = section("Settings", "Hatch webhook", "webhook")
+pcall(function()
+	Options.HookUrl = HatchHook.sec:AddInput("HookUrl", {
+		Title = "Discord webhook URL",
+		Description = "Posts here when you hatch a pet at a selected rarity. Leave blank to disable.",
+		Placeholder = "https://discord.com/api/webhooks/...",
+		Default = "",
+	})
+	Options.HookRarities = HatchHook.sec:AddDropdown("HookRarities", {
+		Title = "Notify on",
+		Description = "Only these rarities get posted. Nothing picked = no posts.",
+		Values = HatchHook.RARITIES,
+		Multi = true,
+		Default = {},
+	})
+end)
+
+do
+	-- Which of the three: normal (1 ticket), extra (25), ultra (100).
+	-- Held on Circus to save a register; Circus already exists above.
+	Circus.sec = section("Machines", "Circus", "ticket")
+	Circus.modeDrop = Circus.sec:AddDropdown("CircusMode", {
+		Title = "Minigame",
+		Description = "Which one to play on repeat. Ultra costs 100 tickets a round, extra 25, normal 1.",
+		Values = Circus.MODES,
+		Default = "normal",
+	})
+	pcall(function()
+		Options.CircusMode = Circus.modeDrop
+	end)
+	bindToggle(
+		Circus.sec,
+		{
+			id = "AutoCircus",
+			title = "Auto circus minigame",
+			desc = "Plays the chosen minigame on repeat until you run out of tickets",
+			group = "Circus",
+		},
+		"circus",
+		function(t)
+			Circus.run(t)
+		end,
+		2,
+		function()
+			-- Stopping properly means clearing the game's own loop flag.
+			-- playMinigame(ctl, 2) runs its round loop INSIDE our runner's
+			-- coroutine, so setting t.alive=false cannot break out of it - the
+			-- loop only exits when it re-reads isAutoPlaying() and finds it
+			-- false. Clearing it here is what actually stops the minigame.
+			pcall(function()
+				local ctl = CircusController or getController("CircusController")
+				if ctl then
+					ctl:setIsAutoPlaying(false)
+					-- isPlaying is a separate flag the controller only clears
+					-- itself after a whole round finishes. Without this the
+					-- in-flight round keeps spending tickets after the toggle is
+					-- off, which is the "it will not stop" symptom.
+					if ctl.setIsPlaying then
+						ctl:setIsPlaying(false)
+					end
+				end
+			end)
+			-- and put the game's own auto-click chance back
+			Circus_restoreLuck()
+		end
+	)
+end
+
 bindToggle(secMisc, { id = "AutoSkillTree", title = "Auto buy skill tree", desc = "Buys every affordable skill on the current map's tree", group = "Misc" }, "skillTree", skillTreeRunner, 0.5)
 
 -- ==================================================================
@@ -5667,7 +6377,7 @@ end
 -- A plain file backup is written too, since SaveManager lives in the executor's
 -- storage and that can be wiped independently of this script.
 local AUTOSAVE_ENABLED = true
-local AUTOSAVE_INTERVAL = 30
+LiveCounts.AUTOSAVE_INTERVAL = 30
 local AUTOSAVE_KEY = "rcu_hub_autosave.json"
 
 local function optionSnapshot()
@@ -5881,7 +6591,7 @@ end
 -- Values.hatchSpeed returns 8.83 - the counter is a purchase index and the
 -- upgrade list has diminishing returns, so using the raw number as the
 -- multiplier understates the real cycle time and fires too slowly.
-local HATCH_CYCLE = 4.11
+LiveCounts.HATCH_CYCLE = 4.11
 
 -- One table rather than three locals, for the same register reason.
 local Hatch = {}
@@ -5901,7 +6611,7 @@ function Hatch.speed()
 end
 
 function Hatch.interval()
-	local base = HATCH_CYCLE / Hatch.speed()
+	local base = LiveCounts.HATCH_CYCLE / Hatch.speed()
 	-- a floor so a transient bad read cannot turn into a tight loop
 	return math.max(base, 0.05)
 end
@@ -6148,6 +6858,31 @@ coroutine.wrap(function()
 			)
 
 			stage = "machines"
+			-- hatch webhook: diff the pet inventory and post anything new whose
+			-- rarity is selected. Runs off the same 1s ticker, no extra task.
+			pcall(function()
+				local set = {}
+				if Options.HookRarities and Options.HookRarities.Value then
+					for r, on in pairs(Options.HookRarities.Value) do
+						if on then
+							set[tostring(r)] = true
+						end
+					end
+				end
+				local url = ""
+				pcall(function()
+					url = Options.HookUrl and Options.HookUrl.Value or ""
+				end)
+				if next(set) ~= nil and type(url) == "string" and url ~= "" then
+					HatchHook.tick(data, set, url)
+				else
+					-- keep the baseline fresh so enabling later reports nothing
+					HatchHook.seen = HatchHook.seen or nil
+					if url == "" or next(set) == nil then
+						HatchHook.tick(data, nil, nil)
+					end
+				end
+			end)
 			-- Re-assert the window's parent every tick.
 			--
 			-- Something in the game detaches Fluent's ScreenGui after load, and a
@@ -6327,7 +7062,7 @@ end)
 -- rolling save, so a crash or a disconnect loses at most one interval
 task.spawn(function()
 	while not stopped and not Fluent.Unloaded do
-		task.wait(AUTOSAVE_INTERVAL)
+		task.wait(LiveCounts.AUTOSAVE_INTERVAL)
 		if stopped or Fluent.Unloaded then
 			break
 		end
@@ -6384,7 +7119,7 @@ task.spawn(function()
 	if not data or not Util or not Util.eggUtils then
 		return
 	end
-	local priced = { NEAREST_EGG }
+	local priced = { LiveCounts.NEAREST_EGG }
 	for _, name in ipairs(eggNames) do
 		local cost, cur = "-", ""
 		local okc, c = pcall(function()
