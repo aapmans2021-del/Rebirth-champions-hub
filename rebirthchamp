@@ -2507,7 +2507,705 @@ end
 -- ------------------------------------------------------------------
 local AutoIndex = nil
 do
-	local src = rawget(_G, "__RCU_EGG_INDEX_SRC")
+	-- Auto Index module, embedded verbatim.
+	--
+	-- This used to be injected from OUTSIDE via _G.__RCU_EGG_INDEX_SRC, which
+	-- only worked when I set that global before loading. Loaded the normal way
+	-- (loadstring of a GitHub raw URL) the global is absent, AutoIndex stayed
+	-- nil, and the next statement -- "AutoIndex.hatchEgg = ..." -- threw
+	-- "attempt to index nil with 'hatchEgg'", killing the hub before the window
+	-- opened. Embedding the source as a string constant makes the file
+	-- self-contained, and a string costs no local registers.
+	local src = [==[-- rcu-egg-index.luau - Auto Index.
+--
+-- Lives in its own file because rcu-hub.luau's main chunk is a single register
+-- scope and Luau caps it at 200; this is a big feature with a lot of helpers,
+-- and inlining it tipped the hub over the limit. A separate file gets its own
+-- scope, so none of this costs the hub anything.
+--
+-- Returns Build(sec, Options, ctx) which adds the toggles + dropdowns and
+-- registers the runner. ctx carries the hub's services and helpers.
+--
+-- ---------------------------------------------------------------------------
+-- What it does
+--
+-- You pick rarities (and optionally the shiny variant) in a dropdown. The
+-- feature works out every pet in the game at those rarities that you have NOT
+-- unlocked yet, finds an egg that can drop one of them, teleports there and
+-- hatches at the normal legal rate until they are all unlocked.
+--
+-- It does not force a variant and does not touch the odds. It only chooses
+-- WHICH EGG to open and when to stop. Hatching is the game's own loop at the
+-- game's own speed; we just point it at an egg and watch the collection.
+--
+-- If a wanted pet is craftable (canCraftToTier), it hands the job to the
+-- craft machine instead of hatching - verified below.
+--
+-- ---------------------------------------------------------------------------
+-- Game data, all verified against the live account
+--
+-- Shared.List.Pets.Eggs[name] = { cost, currency, pets, requiredMap }
+--   pets is a MAP of petName -> chance (a number, not an array). 74 eggs.
+--
+-- Shared.List.Pets.Pets[name] = { rarity, multiplier, indexCategory, ... }
+--   1403 pets. rarity is a NAME string, one of the 13 in Rarities (1..13):
+--   Common, Uncommon, Rare, Epic, Legendary, Mythical, Eternal, Secret,
+--   Divine, Mysterious, Exclusive, Supreme, Ultimate.
+--
+-- Shared.List.Pets.Tiers[i] = { name, ... } keyed by NUMBER 1..5:
+--   Normal, Golden, Toxic, Galaxy, Rainbow. Only Rainbow has canIndex=false.
+--
+-- Ownership is read with Util.petUtils.getPetDescriptor(item), which returns
+-- "name:tier" or "name:tier:s". Verified: the trailing "s" is exactly
+-- item:isShiny() - 79 of 226 owned descriptors ended in "s" and all 79 were
+-- isShiny() == true, with zero false positives among the rest. So a shiny pet
+-- is a genuinely separate unlock, and the variant dropdown has something real
+-- to select.
+-- ---------------------------------------------------------------------------
+
+return function(REPO)
+	local RS = REPO.RS
+	local Knit = REPO.Knit
+	local Util = REPO.Util
+	local PetsList = REPO.PetsList
+	local RaritiesList = REPO.RaritiesList
+	local EggList = REPO.EggList
+
+	-- Rarities split into two groups, because the user asked for Eternal+ to
+	-- have its own dropdown: those are much harder to actually land, so they
+	-- want to opt into that chase separately from the common grind.
+	local ETERNAL_PLUS = { Eternal = true, Secret = true, Divine = true, Mysterious = true, Supreme = true, Ultimate = true }
+
+	local ALL_RARITIES = {}
+	for _, def in pairs(RaritiesList) do
+		if type(def) == "table" and def.name then
+			ALL_RARITIES[#ALL_RARITIES + 1] = tostring(def.name)
+		end
+	end
+	table.sort(ALL_RARITIES)
+
+	local normalRarities, highRarities = {}, {}
+	for _, r in ipairs(ALL_RARITIES) do
+		if ETERNAL_PLUS[r] then
+			highRarities[#highRarities + 1] = r
+		else
+			normalRarities[#normalRarities + 1] = r
+		end
+	end
+
+	-- ------------------------------------------------------------------
+	-- helpers
+	-- ------------------------------------------------------------------
+
+-- What the game considers unlocked.
+	--
+	-- Read data.index, NOT the inventory. These are NOT the same thing and
+	-- using the inventory gives wrong answers in both directions: measured on
+	-- this account at one Epic tier, 59 pets were in data.index with no
+	-- inventory row at all, and 74 were in the inventory but not in data.index.
+	-- data.index is the persistent collection the server owns and the same set
+	-- IndexUtils.hasIndex reads, so it is the only correct source.
+	--
+	-- Shiny is handled exactly as the game does it - hasIndex is
+	--   index[desc] or index[desc .. ":s"]
+	-- so either form marks the base pet done, and the shiny form is its own
+	-- entry. Shiny is therefore part of the index, but it is not a "variant"
+	-- choice: it arrives from the same hatch, so it is never gated separately.
+	local function isUnlocked(data, key)
+		local idx = data.index
+		if type(idx) ~= "table" then
+			return false
+		end
+		return (idx[key] == nil) and (idx[key .. ":s"] == nil)
+	end
+
+	-- normalise a pet name to the lowercase form a descriptor uses
+	-- ("Petal Deer" -> "petaldeer")
+	local function descName(name)
+		return (tostring(name):lower():gsub("[%s%-']", ""))
+	end
+
+-- What is still missing from ONE specific egg, recomputed from scratch.
+	--
+	-- Deliberately independent of buildEggPlan's tables. The plan entries are
+	-- shared objects held in the runner, and writing the recomputed list back
+	-- onto them was corrupting the very list the next pass read, which made the
+	-- runner think the current egg had nothing left after one tick and skipped
+	-- straight past it. Computing from EggList + data.index only means there is
+	-- no shared state to go stale.
+	--
+	-- Returns a list of {pet, tier, rarity} plus a count and the odds.
+	local function eggMissingList(data, eggName, wantRarities, tiers)
+		local egg = EggList[eggName]
+		local out, count = {}, 0
+		if type(egg) ~= "table" or type(egg.pets) ~= "table" then
+			return out, 0, 0
+		end
+		local raritySet, tierSet = {}, {}
+		for _, r in ipairs(wantRarities or {}) do
+			raritySet[r] = true
+		end
+		for _, n in ipairs(tiers or {}) do
+			tierSet[n] = true
+		end
+		local anyTier = next(tierSet) == nil
+
+		local bestChance, total = 0, 0
+		for petName, chance in pairs(egg.pets) do
+			local def = PetsList[petName]
+			if type(chance) == "number" and type(def) == "table" and raritySet[def.rarity] then
+				local base = descName(petName)
+				for tier = 1, 4 do
+					if anyTier or tierSet[tier] then
+						if isUnlocked(data, base .. ":" .. tier) then
+							out[#out + 1] = { pet = petName, tier = tier, rarity = def.rarity }
+							count += 1
+							total += chance
+							if chance > bestChance then
+								bestChance = chance
+							end
+						end
+					end
+				end
+			end
+		end
+		return out, count, bestChance
+	end
+
+-- Build the work list: one entry per egg, each carrying the specific
+	-- (pet, tier) pairs THAT EGG can drop and that you are still missing.
+	--
+	-- Per egg, not global, because the behaviour wanted is: stand at one egg
+	-- and stay there until everything you want from THAT egg is collected,
+	-- then move to the next egg, one at a time. So the plan has to be able to
+	-- answer "what is still missing from the egg I am standing at", which a
+	-- single global target list cannot.
+	--
+	-- Each entry also reports the egg's own contents at your selected
+	-- rarities/tiers - how many of its pets you already have versus how many
+	-- are still missing - so the status line can show what is actually in the
+	-- egg rather than just a name.
+	local function buildEggPlan(data, wantRarities, tiers)
+		local raritySet, tierSet = {}, {}
+		for _, r in ipairs(wantRarities or {}) do
+			raritySet[r] = true
+		end
+		for _, n in ipairs(tiers or {}) do
+			tierSet[n] = true
+		end
+		local anyTier = next(tierSet) == nil
+
+		-- which (pet, tier) pairs are we after at all?
+		local wanted = {}
+		for petName, def in pairs(PetsList) do
+			if type(def) == "table" and raritySet[def.rarity] then
+				local base = descName(petName)
+				for tier = 1, 4 do
+					if anyTier or tierSet[tier] then
+						if isUnlocked(data, base .. ":" .. tier) then
+							wanted[tostring(petName)] = wanted[tostring(petName)] or {}
+							local lst = wanted[tostring(petName)]
+							lst[#lst + 1] = { pet = petName, tier = tier, rarity = def.rarity }
+						end
+					end
+				end
+			end
+		end
+
+		local plan = {}
+		for eggName, egg in pairs(EggList) do
+			if type(egg) == "table" and type(egg.pets) == "table" then
+				local missingHere, haveHere, ignored = {}, 0, 0
+				for petName, tiersList in pairs(wanted) do
+					local chance = egg.pets[petName]
+					if type(chance) == "number" then
+						-- count what we already have of this egg's relevant pets
+						for _, entry in ipairs(tiersList) do
+							missingHere[#missingHere + 1] = entry
+						end
+					end
+				end
+				-- "collected" side: pets this egg drops that we already have at
+				-- any of the tiers we care about
+				for petName in pairs(egg.pets) do
+					local lst = wanted[tostring(petName)]
+					if not lst then
+						ignored += 1
+					end
+				end
+				if #missingHere > 0 then
+					-- best odds among this egg's own missing pets
+					local bestChance, total = 0, 0
+					for _, entry in ipairs(missingHere) do
+						local c = egg.pets[entry.pet] or 0
+						total += c
+						if c > bestChance then
+							bestChance = c
+						end
+					end
+					plan[#plan + 1] = {
+						egg = eggName,
+						missing = missingHere,
+						count = #missingHere,
+						chance = bestChance,
+						totalChance = total,
+						cost = egg.cost,
+						currency = egg.currency,
+						ignored = ignored,
+					}
+				end
+			end
+		end
+		-- Most wanted pets per egg first: finishing an egg completely is the
+		-- goal, so start where a single egg can complete the most.
+		table.sort(plan, function(a, b)
+			if a.count ~= b.count then
+				return a.count > b.count
+			end
+			if a.totalChance ~= b.totalChance then
+				return a.totalChance > b.totalChance
+			end
+			return tostring(a.egg) < tostring(b.egg)
+		end)
+		return plan
+	end
+
+	-- ------------------------------------------------------------------
+	-- UI	-- UI
+	-- ------------------------------------------------------------------
+
+	local ui = {}
+
+function ui.build(sec, Options, helpers)
+		sec:AddParagraph({
+			Title = "How it works",
+			Content = "Pick rarities and the tiers (variants) you want. Every pet at those rarities whose tiers are not yet in the index becomes a target; the hub opens whichever egg covers the most missing targets, at the normal hatch rate, until they are all unlocked. Shiny is not a separate choice - a normal or shiny drop of the right tier counts, exactly as the game's own index does.",
+		})
+
+		-- The two rarity groups are fully independent: rarities AND tiers are
+		-- chosen separately for each, so the harder Eternal+ chase can be
+		-- aimed at, say, Golden and Toxic only without touching the main list.
+		local TIER_VALUES = { "Normal", "Golden", "Toxic", "Galaxy" }
+
+		local rarityDrop = sec:AddDropdown("IndexRarities", {
+			Title = "Rarities",
+			Description = "Which rarities to chase. Anything not picked is ignored entirely.",
+			Values = normalRarities,
+			Multi = true,
+			Default = {},
+		})
+		pcall(function()
+			Options.IndexRarities = rarityDrop
+		end)
+
+		local tierDrop = sec:AddDropdown("IndexTiers", {
+			Title = "Variants",
+			Description = "Which tiers to chase. Nothing picked = every tier.",
+			Values = TIER_VALUES,
+			Multi = true,
+			Default = {},
+		})
+		pcall(function()
+			Options.IndexTiers = tierDrop
+		end)
+
+		local highDrop = sec:AddDropdown("IndexHighRarities", {
+			Title = "Eternal and above rarities",
+			Description = "The hard ones, kept separate. Pick nothing here to leave them alone.",
+			Values = highRarities,
+			Multi = true,
+			Default = {},
+		})
+		pcall(function()
+			Options.IndexHighRarities = highDrop
+		end)
+
+		local highTierDrop = sec:AddDropdown("IndexHighTiers", {
+			Title = "Eternal and above variants",
+			Description = "Their own tier list, independent of the one above.",
+			Values = TIER_VALUES,
+			Multi = true,
+			Default = {},
+		})
+		pcall(function()
+			Options.IndexHighTiers = highTierDrop
+		end)
+
+		local craftToggle = sec:AddToggle("IndexCraft", {
+			Title = "Craft wanted pets",
+			Description = "If a wanted pet can be made by the pet machines, craft it instead of waiting on luck",
+			Default = true,
+		})
+		pcall(function()
+			Options.IndexCraft = craftToggle
+		end)
+
+		ui.status = sec:AddParagraph({
+			Title = "Index status",
+			Content = "Idle",
+		})
+
+		-- the toggle and its runner live in the hub so they join the shared
+		-- task registry and can be stopped by "Stop everything"
+		helpers.bindToggle(
+			sec,
+			{
+				id = "AutoIndex",
+				title = "Auto Index",
+				desc = "Hatches the best egg for every pet you are missing at your chosen rarities",
+				group = "Index",
+			},
+			"index",
+			function(t)
+				-- Options MUST be passed through: the runner reads the rarity
+				-- and tier dropdowns from it, and bindToggle only hands the
+				-- runner a single `t` argument. Omitting it made every tick
+				-- die on "attempt to index nil with 'IndexRarities'".
+				ui.runner(t, helpers, Options)
+			end,
+			0.5,
+			function(t)
+				t.targetEgg = nil
+				-- clear the pinned egg so a restart begins from the best one
+				t.currentEggName = nil
+				t.eggIdx = nil
+			end
+		)
+	end
+
+	-- ------------------------------------------------------------------
+	-- runner
+	-- ------------------------------------------------------------------
+	function ui.runner(t, helpers, Options)
+		if (t.cooldown or 0) > os.clock() then
+			return
+		end
+		local data = helpers.getData()
+		if not data then
+			return
+		end
+
+-- Tier labels map back to the tier numbers buildEggPlan expects.
+		local TIER_NUM = { Normal = 1, Golden = 2, Toxic = 3, Galaxy = 4 }
+
+		-- Read a Multi dropdown that may hold either shape.
+		--
+		-- Fluent's own Value is a SET keyed by option NAME. But a dropdown
+		-- restored from the JSON backup can arrive as a plain ARRAY, because
+		-- optionSnapshot only keeps string keys and JSONEncode then emits an
+		-- array - which is how IndexRarities was saved as {"1","2",...,"6"}
+		-- and silently selected nothing, since no rarity is named "1".
+		-- So accept names, and accept bare numbers as positional indexes into
+		-- the dropdown's own Values list.
+		local function optionValues(dropdown)
+			local ok, v = pcall(function()
+				return dropdown and dropdown.Value
+			end)
+			local list = {}
+			if not ok or type(v) ~= "table" then
+				return list
+			end
+			local opts = {}
+			pcall(function()
+				opts = dropdown.Options or {}
+			end)
+			for k, val in pairs(v) do
+				if val then
+					local name = k
+					local num = tonumber(k)
+					if num and opts[num] then
+						name = tostring(opts[num])
+					end
+					if type(name) == "string" and name ~= "" then
+						list[#list + 1] = name
+					end
+				end
+			end
+			table.sort(list)
+			return list
+		end
+
+		-- each rarity group is resolved with ITS OWN tier list
+		local function tiersFrom(dropdown)
+			local list = optionValues(dropdown)
+			local out = {}
+			for _, label in ipairs(list) do
+				local n = TIER_NUM[label]
+				if n then
+					out[#out + 1] = n
+				end
+			end
+			return out
+		end
+
+		local groups = {}
+		-- Each rarity group is paired with ITS OWN tier dropdown. Passing the
+		-- rarity dropdown to tiersFrom (as this did) meant no rarity name ever
+		-- matched a tier name, so every group silently fell back to "all tiers"
+		-- and the tier selection did nothing at all.
+		local function collect(rarityDropdown, tierDropdown)
+			local list = optionValues(rarityDropdown)
+			if #list > 0 then
+				groups[#groups + 1] = { list = list, tiers = tiersFrom(tierDropdown) }
+			end
+		end
+		collect(Options.IndexRarities, Options.IndexTiers)
+		collect(Options.IndexHighRarities, Options.IndexHighTiers)
+
+		if #groups == 0 then
+			t.idle = true
+			t.targetEgg = nil
+			if ui.status and not t.toldNone then
+				t.toldNone = true
+				pcall(function()
+					ui.status:SetDesc("Pick at least one rarity to chase.")
+				end)
+			end
+			return
+		end
+		t.toldNone = false
+
+		-- union the two groups' egg plans; an egg reachable by either group counts
+		-- once, and its missing list is the union of both.
+		local rarityLabel = {}
+		local plan, seenEgg = {}, {}
+		for _, g in ipairs(groups) do
+			local sub = buildEggPlan(data, g.list, g.tiers)
+			for _, entry in ipairs(sub) do
+				local existing = seenEgg[entry.egg]
+				if existing then
+					local have = {}
+					for _, m in ipairs(existing.missing) do
+						have[m.pet .. ":" .. m.tier] = true
+					end
+					for _, m in ipairs(entry.missing) do
+						local k = m.pet .. ":" .. m.tier
+						if not have[k] then
+							existing.missing[#existing.missing + 1] = m
+							have[k] = true
+						end
+					end
+					existing.count = #existing.missing
+				else
+					seenEgg[entry.egg] = entry
+					plan[#plan + 1] = entry
+				end
+			end
+			for _, r in ipairs(g.list) do
+				rarityLabel[r] = true
+			end
+		end
+		table.sort(plan, function(a, b)
+			if a.count ~= b.count then
+				return a.count > b.count
+			end
+			if a.totalChance ~= b.totalChance then
+				return a.totalChance > b.totalChance
+			end
+			return tostring(a.egg) < tostring(b.egg)
+		end)
+
+		local rarityList = {}
+		for r in pairs(rarityLabel) do
+			rarityList[#rarityList + 1] = r
+		end
+		table.sort(rarityList)
+
+		-- total still wanted, across every egg
+		local totalWanted = 0
+		for _, e in ipairs(plan) do
+			totalWanted += e.count
+		end
+		t.missing = totalWanted
+		t.eggCount = #plan
+
+		if totalWanted == 0 then
+			t.done = true
+			t.targetEgg = nil
+			t.eggIdx = nil
+			if not t.toldDone then
+				t.toldDone = true
+				helpers.notify("Auto Index", "Everything selected is unlocked.")
+			end
+			if ui.status then
+				pcall(function()
+					ui.status:SetDesc(("All done - every %s pet is unlocked."):format(table.concat(rarityList, ", ")))
+				end)
+			end
+			return
+		end
+		t.done = false
+		t.toldDone = false
+
+		-- STAY ON ONE EGG until everything you want from it is collected.
+		-- Only move to the next egg once this one reports zero remaining, so
+		-- each egg is finished properly before the next is started.
+		--
+		-- The current egg is pinned BY NAME, not by index: the plan is rebuilt
+		-- and re-sorted every pass (counts shrink as pets land, which reorders
+		-- it), so an index would drift onto a different egg each tick and never
+		-- finish any of them.
+		--
+		-- The egg's remaining list comes from eggMissingList, computed fresh from
+		-- EggList + data.index, NOT from the plan entry's `missing` field. The
+		-- plan entries are shared objects the runner also writes to, so reading
+		-- back a list it had just overwritten is what made it believe an egg
+		-- was empty after a single tick and skip it.
+		local eggName = t.currentEggName
+		local stillMissing, stillCount, stillChance = {}, 0, 0
+
+		if eggName then
+			-- re-derive against the union of both groups' selections
+			local mergedList, mergedTiers = {}, {}
+			local rarSeen = {}
+			for _, g in ipairs(groups) do
+				for _, r in ipairs(g.list) do
+					rarSeen[r] = true
+				end
+				for _, n in ipairs(g.tiers) do
+					mergedTiers[n] = true
+				end
+			end
+			for r in pairs(rarSeen) do
+				mergedList[#mergedList + 1] = r
+			end
+			table.sort(mergedList)
+			local tierList = {}
+			for n in pairs(mergedTiers) do
+				tierList[#tierList + 1] = n
+			end
+			table.sort(tierList)
+			stillMissing, stillCount, stillChance =
+				eggMissingList(data, eggName, mergedList, tierList)
+		end
+
+		-- no pin, or this egg is now complete for our selection: move on
+		if not eggName or stillCount == 0 then
+			if eggName and eggName ~= t.currentEggName then
+				t.eggJustFinished = eggName
+			end
+			t.currentEggName = nil
+			t.eggIdx = nil
+			-- choose the next egg straight from the plan
+			local nextEntry = plan[1]
+			if not nextEntry then
+				return
+			end
+			t.currentEggName = nextEntry.egg
+			-- recompute for the new egg
+			local mergedList, mergedTiers = {}, {}
+			local rarSeen = {}
+			for _, g in ipairs(groups) do
+				for _, r in ipairs(g.list) do
+					rarSeen[r] = true
+				end
+				for _, n in ipairs(g.tiers) do
+					mergedTiers[n] = true
+				end
+			end
+			for r in pairs(rarSeen) do
+				mergedList[#mergedList + 1] = r
+			end
+			table.sort(mergedList)
+			local tierList = {}
+			for n in pairs(mergedTiers) do
+				tierList[#tierList + 1] = n
+			end
+			table.sort(tierList)
+			stillMissing, stillCount, stillChance =
+				eggMissingList(data, t.currentEggName, mergedList, tierList)
+			-- report the egg we just finished
+			if eggName then
+				t.eggJustFinished = eggName
+			end
+		end
+
+		if stillCount == 0 then
+			-- nothing anywhere left; the total==0 branch above normally catches it
+			t.currentEggName = nil
+			return
+		end
+
+		local idx = 1
+		for i, e in ipairs(plan) do
+			if e.egg == t.currentEggName then
+				idx = i
+				break
+			end
+		end
+		t.eggIdx = idx
+		t.targetEgg = t.currentEggName
+		t.eggMissing = stillCount
+		local entry = { egg = t.currentEggName, chance = stillChance }
+
+		-- what this egg actually holds, for the status line
+		local raritiesInEgg = {}
+		for _, m in ipairs(stillMissing) do
+			raritiesInEgg[m.rarity] = true
+		end
+		local rarList = {}
+		for r in pairs(raritiesInEgg) do
+			rarList[#rarList + 1] = r
+		end
+		table.sort(rarList)
+
+		-- craft first if asked: a craftable target never needs luck
+		if Options.IndexCraft and Options.IndexCraft.Value then
+			local svc = REPO.getService("PetService")
+			if svc then
+				local crafted = 0
+				for _, m in ipairs(stillMissing) do
+					if crafted >= 5 then
+						break
+					end
+					if m.tier and m.tier > 1 then
+						if helpers.craftOne(m.pet, m.tier) then
+							crafted += 1
+						end
+					end
+				end
+				if crafted > 0 then
+					t.cooldown = os.clock() + 2
+					t.crafted = (t.crafted or 0) + crafted
+					if ui.status then
+						pcall(function()
+							ui.status:SetDesc(("Crafting %d wanted from %s - %d left"):format(crafted, tostring(entry.egg), #stillMissing))
+						end)
+					end
+					return
+				end
+			end
+		end
+
+		-- Hatch the CURRENT egg. We do NOT rotate here: entry is the egg we are
+		-- standing at and it keeps its remaining list until it is empty, at
+		-- which point the block above advances t.eggIdx by one. So each egg is
+		-- finished completely before the next one is started, which is the
+		-- behaviour asked for.
+		if ui.status then
+			pcall(function()
+				ui.status:SetDesc(
+					("Egg %d/%d: %s | %d wanted left here | rarities: %s | best %s%%"):format(
+						idx,
+						#plan,
+						tostring(entry.egg),
+						#stillMissing,
+						#rarList > 0 and table.concat(rarList, ", ") or "-",
+						REPO.suffix(entry.chance * 100)
+					)
+				)
+			end)
+		end
+
+		-- hand the hatch to the hub so we get the teleport, the batch size and
+		-- the legal interval for free. It returns false when it could not get
+		-- us into range, in which case we stay on this egg and retry next tick.
+		local opened = helpers.hatchEgg(entry.egg)
+		t.cooldown = os.clock() + 0.5
+	end
+
+	return ui
+end]==]
 	if type(src) == "string" and src ~= "" then
 		local chunk = loadstring(src)
 		if chunk then
