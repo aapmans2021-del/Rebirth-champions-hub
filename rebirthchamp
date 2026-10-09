@@ -1,4 +1,3 @@
-local STATE = STATE or {}
 
 local stopped = false
 
@@ -122,6 +121,170 @@ local FallRebirths = require(ReplicatedStorage.Shared.List.Fall.FallRebirths)
 local HarvestTree = require(ReplicatedStorage.Shared.List.Fall.HarvestTree)
 local LeavesMachine = require(ReplicatedStorage.Shared.List.Fall.LeavesMachine)
 local RakeUpgrader = require(ReplicatedStorage.Shared.List.Fall.RakeUpgrader)
+-- Extra Fluent themes.
+--
+-- This used to live in rcu-themes.luau, loaded via readfile. That stopped
+-- working: readfile in this executor is restricted to a workspace-relative
+-- path and rejects an absolute one with "Path outside workspace", so the load
+-- silently failed and the whole Theme dropdown vanished from Settings. It is
+-- inlined here instead, as ONE closure, so it still costs a single register
+-- (see the note above about the 200-register cap).
+--
+-- Everything is inside the closure on purpose: the spec table, the Fluent
+-- theme-registry lookup and the dropdown builder all share this one scope.
+--
+-- How it works: Fluent keeps its themes in a private table reachable only
+-- through Creator.GetThemeProperty's first upvalue, where Creator is the
+-- second upvalue of Fluent.SetTheme. Fluent:SetTheme silently no-ops on a
+-- name it does not know, so a new theme means registering its table there
+-- first. Verified: clone Dark, rename it, push it into Themes and
+-- Themes.Names, then SetTheme applies it and Fluent.Theme reports the new
+-- name. Each theme is generated from Dark rather than written out by hand so
+-- every key Fluent expects is present - a partial table leaves elements
+-- unpainted.
+--
+-- Colour fields are: accent, element, tab, and the three dark backgrounds
+-- acrylicMain / acrylicBorder / dialog (dialog doubles as DropdownHolder).
+local function Themes_build(sec, Options)
+	if type(sec) ~= "table" or type(Fluent) ~= "table" then
+		return
+	end
+
+	local EXTRA = {
+		-- Halloween / autumn
+		{ name = "Halloween", accent = Color3.fromRGB(255, 140, 0), element = Color3.fromRGB(255, 170, 60), tab = Color3.fromRGB(200, 105, 10), main = Color3.fromRGB(38, 26, 14), border = Color3.fromRGB(122, 78, 34), dialog = Color3.fromRGB(112, 62, 24) },
+		{ name = "Pumpkin", accent = Color3.fromRGB(255, 122, 20), element = Color3.fromRGB(255, 160, 70), tab = Color3.fromRGB(214, 96, 24), main = Color3.fromRGB(44, 28, 16), border = Color3.fromRGB(136, 82, 38), dialog = Color3.fromRGB(124, 66, 26) },
+		{ name = "Ghost", accent = Color3.fromRGB(240, 240, 255), element = Color3.fromRGB(225, 225, 245), tab = Color3.fromRGB(190, 190, 215), main = Color3.fromRGB(30, 30, 38), border = Color3.fromRGB(96, 96, 112), dialog = Color3.fromRGB(74, 74, 90) },
+		{ name = "Vampire", accent = Color3.fromRGB(196, 24, 60), element = Color3.fromRGB(226, 90, 110), tab = Color3.fromRGB(150, 20, 48), main = Color3.fromRGB(32, 14, 20), border = Color3.fromRGB(108, 44, 58), dialog = Color3.fromRGB(98, 26, 40) },
+		{ name = "Spooky", accent = Color3.fromRGB(255, 200, 40), element = Color3.fromRGB(255, 220, 110), tab = Color3.fromRGB(200, 155, 35), main = Color3.fromRGB(34, 28, 16), border = Color3.fromRGB(110, 90, 42), dialog = Color3.fromRGB(96, 76, 32) },
+		{ name = "Harvest", accent = Color3.fromRGB(224, 148, 40), element = Color3.fromRGB(240, 180, 90), tab = Color3.fromRGB(180, 118, 32), main = Color3.fromRGB(36, 30, 18), border = Color3.fromRGB(116, 94, 44), dialog = Color3.fromRGB(104, 82, 36) },
+		{ name = "Candy", accent = Color3.fromRGB(255, 105, 180), element = Color3.fromRGB(255, 150, 200), tab = Color3.fromRGB(205, 80, 150), main = Color3.fromRGB(36, 22, 32), border = Color3.fromRGB(118, 68, 96), dialog = Color3.fromRGB(106, 58, 86) },
+		{ name = "Witch", accent = Color3.fromRGB(126, 60, 200), element = Color3.fromRGB(160, 100, 225), tab = Color3.fromRGB(98, 44, 158), main = Color3.fromRGB(26, 20, 36), border = Color3.fromRGB(90, 58, 132), dialog = Color3.fromRGB(78, 48, 116) },
+		-- seasonal + originals
+		{ name = "Ember", accent = Color3.fromRGB(255, 122, 46), element = Color3.fromRGB(255, 154, 92), tab = Color3.fromRGB(214, 106, 52), main = Color3.fromRGB(40, 30, 28), border = Color3.fromRGB(122, 74, 55), dialog = Color3.fromRGB(120, 58, 36) },
+		{ name = "Bloodmoon", accent = Color3.fromRGB(226, 48, 48), element = Color3.fromRGB(214, 92, 92), tab = Color3.fromRGB(180, 48, 48), main = Color3.fromRGB(34, 22, 24), border = Color3.fromRGB(110, 55, 55), dialog = Color3.fromRGB(105, 34, 34) },
+		{ name = "Frost", accent = Color3.fromRGB(150, 220, 255), element = Color3.fromRGB(186, 232, 255), tab = Color3.fromRGB(120, 180, 220), main = Color3.fromRGB(26, 32, 40), border = Color3.fromRGB(70, 95, 118), dialog = Color3.fromRGB(46, 78, 106) },
+		{ name = "Gold", accent = Color3.fromRGB(255, 200, 60), element = Color3.fromRGB(255, 219, 120), tab = Color3.fromRGB(210, 165, 55), main = Color3.fromRGB(38, 34, 24), border = Color3.fromRGB(126, 105, 55), dialog = Color3.fromRGB(115, 90, 38) },
+		{ name = "Toxic", accent = Color3.fromRGB(154, 240, 62), element = Color3.fromRGB(178, 245, 106), tab = Color3.fromRGB(120, 190, 60), main = Color3.fromRGB(28, 36, 26), border = Color3.fromRGB(90, 122, 60), dialog = Color3.fromRGB(62, 110, 40) },
+		{ name = "Neon", accent = Color3.fromRGB(255, 60, 220), element = Color3.fromRGB(240, 130, 235), tab = Color3.fromRGB(200, 60, 180), main = Color3.fromRGB(30, 22, 34), border = Color3.fromRGB(105, 60, 110), dialog = Color3.fromRGB(96, 38, 100) },
+		{ name = "Void", accent = Color3.fromRGB(140, 120, 255), element = Color3.fromRGB(170, 155, 250), tab = Color3.fromRGB(110, 95, 210), main = Color3.fromRGB(22, 20, 32), border = Color3.fromRGB(78, 70, 118), dialog = Color3.fromRGB(58, 50, 100) },
+		{ name = "Mint", accent = Color3.fromRGB(80, 230, 190), element = Color3.fromRGB(130, 240, 214), tab = Color3.fromRGB(70, 180, 155), main = Color3.fromRGB(24, 34, 32), border = Color3.fromRGB(70, 110, 100), dialog = Color3.fromRGB(38, 92, 82) },
+		{ name = "Ocean", accent = Color3.fromRGB(40, 170, 220), element = Color3.fromRGB(110, 205, 235), tab = Color3.fromRGB(30, 130, 175), main = Color3.fromRGB(18, 30, 40), border = Color3.fromRGB(58, 106, 134), dialog = Color3.fromRGB(38, 84, 110) },
+		{ name = "Sunset", accent = Color3.fromRGB(255, 94, 120), element = Color3.fromRGB(255, 145, 130), tab = Color3.fromRGB(210, 70, 100), main = Color3.fromRGB(40, 24, 30), border = Color3.fromRGB(128, 66, 78), dialog = Color3.fromRGB(116, 52, 70) },
+		{ name = "Aurora", accent = Color3.fromRGB(90, 220, 200), element = Color3.fromRGB(150, 200, 255), tab = Color3.fromRGB(120, 130, 230), main = Color3.fromRGB(22, 30, 38), border = Color3.fromRGB(76, 104, 132), dialog = Color3.fromRGB(52, 82, 110) },
+	}
+
+	-- Fluent's private theme registry.
+	local props
+	do
+		local okC, creator = pcall(function()
+			return debug.getupvalues(Fluent.SetTheme)[2]
+		end)
+		if okC and type(creator) == "table" then
+			local okP, p = pcall(function()
+				return debug.getupvalues(creator.GetThemeProperty)[1]
+			end)
+			if okP and type(p) == "table" and type(p.Names) == "table" then
+				props = p
+			end
+		end
+	end
+	if not props or type(props.Dark) ~= "table" then
+		return
+	end
+
+	local added = {}
+	for _, spec in ipairs(EXTRA) do
+		if type(props[spec.name]) ~= "table" then
+			local t = {}
+			-- copy every key the base has, then override the coloured ones
+			for k, v in pairs(props.Dark) do
+				t[k] = v
+			end
+			t.Name = spec.name
+			t.Accent = spec.accent
+			t.Element = spec.element
+			t.Hover = spec.element
+			t.Input = spec.element
+			t.Keybind = spec.element
+			t.SliderRail = spec.element
+			t.ToggleSlider = spec.element
+			t.DropdownOption = spec.element
+			t.Tab = spec.tab
+			t.AcrylicMain = spec.main
+			t.AcrylicBorder = spec.border
+			t.Dialog = spec.dialog
+			t.DialogButton = spec.dialog
+			t.DropdownHolder = spec.dialog
+			-- keep the gradients tinted to the accent, like the stock ones
+			pcall(function()
+				t.AcrylicGradient = ColorSequence.new({
+					ColorSequenceKeypoint.new(0, spec.accent),
+					ColorSequenceKeypoint.new(1, spec.main),
+				})
+			end)
+			props[spec.name] = t
+			props.Names[#props.Names + 1] = spec.name
+		end
+		added[#added + 1] = spec.name
+	end
+
+	local vals = {}
+	for _, v in ipairs(Fluent.Themes) do
+		if type(v) == "string" then
+			vals[#vals + 1] = v
+		end
+	end
+	for _, n in ipairs(added) do
+		local seen = false
+		for _, v in ipairs(vals) do
+			if v == n then
+				seen = true
+				break
+			end
+		end
+		if not seen then
+			vals[#vals + 1] = n
+		end
+	end
+	if #vals == 0 then
+		return
+	end
+	table.sort(vals)
+
+	-- start on whatever the saved config asked for, so restoring settings does
+	-- not visibly repaint the whole window on load
+	local saved = nil
+	if type(Options) == "table" and type(Options.ThemePick) == "table" then
+		local ok, v = pcall(function()
+			return Options.ThemePick.Value
+		end)
+		if ok and type(v) == "string" then
+			saved = v
+		end
+	end
+	local start = saved or Fluent.Theme or vals[1]
+
+	local d = sec:AddDropdown("ThemePick", {
+		Title = "Theme",
+		Description = ("Fluent's own plus %d extra themes (Halloween, Ghost, Vampire, Witch and more)"):format(#added),
+		Default = start,
+		Values = vals,
+		Callback = function(choice)
+			if type(choice) == "string" and choice ~= Fluent.Theme then
+				pcall(function()
+					Fluent:SetTheme(choice)
+				end)
+			end
+		end,
+	})
+	if type(Options) == "table" then
+		pcall(function()
+			Options.ThemePick = d
+		end)
+	end
+end
+
 local FallEventList = require(ReplicatedStorage.Shared.List.Items.FallEvent)
 local Meteors = require(ReplicatedStorage.Shared.List.Meteors)
 local Items = require(ReplicatedStorage.Shared.Items)
@@ -315,6 +478,13 @@ local function itemAmount(data, name)
 end
 
 local Options = Fluent.Options
+
+-- Shared bag for things several far-apart parts of this file touch: the
+-- live-count updater, the tap-skins and craft status paragraphs, and the
+-- UI-build result. Declared as early as possible because this chunk is one
+-- register scope capped at 200 - every top-level local costs a register, and
+-- putting this one late would strand the UI build below the limit.
+local LiveCounts = {}
 
 local eggNames = {}
 for name in pairs(EggList) do
@@ -533,10 +703,88 @@ local function equipPickaxe()
 	end)
 end
 
+-- Which fishing rod do we own, best first?
+--
+-- equipTool's predicate (name contains "fishingrod") matches all 10 rods, and
+-- it scans pairs() which is UNORDERED, so with more than one rod owned the
+-- choice was effectively random. That is the "worked on my rod, not on my
+-- friend's" report: each account picked whichever row came first, and the
+-- runner then proceeded against a rod it had not actually equipped.
+--
+-- Resolve the rod explicitly by its Exclusive index instead, exactly like the
+-- game's own getCurrentFishingRod does, and skip megaFishingRod: it is not an
+-- inventory item but a bought upgrade (data.boughtMegaFishingRod), so there is
+-- no row to equip.
+local function bestOwnedRodId(data)
+	local bestIdx, bestId = -1, nil
+	local inv = data and data.inventory and data.inventory.exclusive
+	if type(inv) ~= "table" then
+		return nil
+	end
+	for id, e in pairs(inv) do
+		local nm = tostring(e.nm or "")
+		if nm:lower():find("fishingrod") and nm ~= "megaFishingRod" then
+			local ok, item = pcall(function()
+				return Util.itemUtils.getItemFromId(data, id)
+			end)
+			local owned = ok and item ~= nil
+			if not owned then
+				owned = (e.am or 0) > 0
+			end
+			if owned then
+				local idx = -1
+				pcall(function()
+					local it = Items.exclusive(nm)
+					local dir = it:directory()
+					idx = dir[it:getName()].index or -1
+				end)
+				if idx > bestIdx then
+					bestIdx, bestId = idx, id
+				end
+			end
+		end
+	end
+	return bestId, bestIdx
+end
+
 local function equipRod()
-	return equipTool("rod", function(nm)
-		return nm:lower():find("fishingrod")
+	local data = getData()
+	if not data then
+		return false
+	end
+	local id = bestOwnedRodId(data)
+	if not id then
+		return false
+	end
+	if data.isFishingRodEquipped then
+		return true
+	end
+	-- the rod has its own slot: put away whatever else is out first
+	unequipAllTools("isFishingRodEquipped")
+	local ok, res = pcall(function()
+		return InventoryService:useItem(id, { use = 1 })
 	end)
+	if not (ok and res == "success") then
+		return false
+	end
+	-- WAIT for the server to actually set the flag.
+	--
+	-- The old version returned immediately and the runner's next tick re-read
+	-- data.isFishingRodEquipped before the replica had updated, so it would
+	-- call equipRod again, unequip and re-equip in a loop and never advance to
+	-- the travel/fishing steps. Equipping is not instantaneous, so poll for it.
+	local deadline = os.clock() + 5
+	while os.clock() < deadline do
+		local fresh = getData()
+		if fresh and fresh.isFishingRodEquipped then
+			return true
+		end
+		if stopped or Fluent.Unloaded then
+			return false
+		end
+		task.wait(0.1)
+	end
+	return false
 end
 
 local function nextAxeLabel(name)
@@ -839,6 +1087,140 @@ local function teleportToEgg(t, egg)
 	return false, "Out of range of " .. tostring(egg)
 end
 
+-- ------------------------------------------------------------------
+-- lucky / global eggs
+--
+-- EggController:spawnGlobalEgg clones Assets.Other.<PascalType>, tags it
+-- "Egg" (the same tag every normal egg uses), stamps it with a
+-- globalEggId attribute, and RENAMES it to the current best egg's name.
+-- So the lucky egg is not its own model type - it is an ordinary
+-- "Egg"-tagged model carrying a globalEggId. That attribute is the only
+-- reliable way to tell them apart.
+--
+-- EggController's proximity loop (getClosestEgg, within 10 studs) is what
+-- sets _globalEggId, and getOpenParams() then returns {globalEggId = ...},
+-- which is what makes openEgg use the lucky egg. Both are automatic: stand
+-- next to the model and the existing hatch loop already opens it with the
+-- right params. So all this has to do is get us there and confirm.
+--
+-- These four helpers were referenced by hatchRunner but never defined, so the
+-- "Hatch lucky eggs" toggle threw "attempt to call a nil value" on every tick
+-- while it was on. Everything below is derived from spawnGlobalEgg itself:
+--   - the model is parented to workspace.Debris and tagged "Egg"
+--   - it carries a globalEggId attribute
+--   - it is RENAMED to the best egg's name, so name-matching finds it anyway
+--   - a LuckyEgg.Holder.Timer label counts the spawn down and the model
+--     destroys itself when it expires, so "still parented" IS "still alive"
+-- so there is no separate lifetime to track: presence in Debris is the flag.
+-- ------------------------------------------------------------------
+
+-- One table, not four locals - see the note on SkillTreeHelpers about the
+-- 200-register cap.
+local LuckyEgg = {}
+
+-- Is there a live lucky egg right now? Returns model, globalEggId.
+function LuckyEgg.find()
+	if not CollectionService or not workspace then
+		return nil
+	end
+	for _, model in ipairs(CollectionService:GetTagged("Egg")) do
+		local id = model:GetAttribute("globalEggId")
+		if id and model:IsDescendantOf(workspace) then
+			return model, id
+		end
+	end
+	return nil
+end
+
+-- Has the game's own proximity loop already locked onto that lucky egg?
+-- EggController sets _globalEggId from the nearest tagged egg each Heartbeat,
+-- so this is true once we are within its scan range of the model.
+function LuckyEgg.at(id)
+	return EggController ~= nil and EggController._globalEggId == id
+end
+
+-- Stand next to the lucky egg and wait for the game to register it.
+function LuckyEgg.teleport(t, model, id)
+	local hrp = Functions.getHRP(LocalPlayer)
+	if not hrp then
+		return false, "No character"
+	end
+	local pp = model.PrimaryPart
+	local target
+	if pp then
+		target = pp.CFrame + pp.CFrame.LookVector * 5.5
+	else
+		local ok, pv = pcall(function()
+			return model:GetPivot().Position
+		end)
+		target = ok and pv or nil
+	end
+	if not target then
+		return false, "Lucky egg has no usable position"
+	end
+	hrp.Anchored = true
+	hrp:PivotTo(target)
+	task.delay(0.5, function()
+		if hrp.Parent then
+			hrp.Anchored = false
+			hrp.AssemblyLinearVelocity = Vector3.zero
+		end
+	end)
+	-- the scan runs on Heartbeat, so give it a moment to pick the model up
+	local deadline = os.clock() + 8
+	while os.clock() < deadline do
+		if LuckyEgg.at(id) then
+			return true
+		end
+		-- it can expire while we walk to it
+		if not model:IsDescendantOf(workspace) then
+			return false, "The lucky egg expired"
+		end
+		if (t and not t.alive) or Fluent.Unloaded or stopped then
+			break
+		end
+		task.wait(0.1)
+	end
+	if LuckyEgg.at(id) then
+		return true
+	end
+	return false, "Could not reach the lucky egg"
+end
+
+-- Seconds left on the model's countdown label, for the notification only.
+function LuckyEgg.secondsLeft(model)
+	local ok, label = pcall(function()
+		return model.LuckyEgg.Holder.Timer.Text
+	end)
+	if not ok or type(label) ~= "string" then
+		return nil
+	end
+	-- spawnGlobalEgg formats it as ("Remaining: %*"):format(formatTime(...))
+	local rest = label:match("Remaining:%s*(.+)$")
+	if not rest then
+		return nil
+	end
+	local d, h, m, s = rest:match("^(%d+)d"), rest:match("^(%d+)h"), rest:match("^(%d+)m"), rest:match("^(%d+)s")
+	local total = 0
+	if d then
+		total += tonumber(d) * 86400
+	end
+	if h then
+		total += tonumber(h) * 3600
+	end
+	if m then
+		total += tonumber(m) * 60
+	end
+	if s then
+		total += tonumber(s)
+	end
+	return total > 0 and total or nil
+end
+--
+-- Note the model is renamed to the best egg, so EggController:getEggModel
+-- can return the lucky egg when we asked for a normal egg. Looking the
+-- model up by attribute avoids that ambiguity entirely.
+-- ------------------------------------------------------------------
 local function currentRakeIndex(data)
 	if not data or not data.inventory or not data.inventory.fallEvent then
 		return nil
@@ -928,6 +1310,40 @@ local function hatchRunner(t)
 	end
 	t.toldGameLoop = false
 
+	-- Lucky / global eggs take priority when the toggle is on. The egg we
+	-- hatch is whatever the lucky model is NAMED after (the game renames it
+	-- to the current best egg), so this still counts as hatching the closest
+	-- egg - we just stand next to the lucky version of it.
+	if Options.AutoHatchLuckyEggs and Options.AutoHatchLuckyEggs.Value then
+		local model, id = LuckyEgg.find()
+		if model then
+			t.luckyId = id
+			if not LuckyEgg.at(id) then
+				local okL, errL = LuckyEgg.teleport(t, model, id)
+				if okL then
+					if not t.toldLucky then
+						t.toldLucky = true
+						local secs = LuckyEgg.secondsLeft(model)
+						notify("Auto Hatch", "At a lucky egg" .. (secs and (" (" .. math.floor(secs / 60) .. "m left)") or ""))
+					end
+					return
+				end
+				if not t.toldLuckyFail then
+					t.toldLuckyFail = true
+					notify("Auto Hatch", errL or "Could not reach the lucky egg")
+				end
+				return
+			end
+			t.toldLuckyFail = false
+			-- standing on it: open under its name so getOpenParams() picks up
+			-- the globalEggId the game just registered for us
+			egg = tostring(model.Name)
+		else
+			t.toldLucky = false
+			t.luckyId = nil
+		end
+	end
+
 	if EggController._currentEgg ~= egg then
 		local ok, err = teleportToEgg(t, egg)
 		if not ok then
@@ -960,15 +1376,14 @@ local function hatchRunner(t)
 		return
 	end
 
+	-- openType 2 = "as many as the batch allows", which is the game's own max
+	-- (Values.MaxEggs, 24 on this account). The amount the server actually
+	-- spends comes from getAmountFromOpenType below, so no amount is sent here.
 	pcall(function()
 		EggService.openEgg:Fire(egg, 2, params)
 	end)
 
-	local okS, speed = pcall(function()
-		return data.upgrades and data.upgrades.hatchSpeed or 1
-	end)
-	local s = okS and speed and speed > 0 and speed or 1
-	t.hatchSpeed = s
+	-- applyHatchInterval reads the speed through Values itself
 	applyHatchInterval(t)
 end
 
@@ -1189,7 +1604,6 @@ end
 -- i.e. over-firing gets rejected). So: stand once in the densest live
 -- cluster, hold fire at 0.02s, and only re-target when that cluster dies.
 -- ------------------------------------------------------------------
-local RAKE_GAP = 0.02
 local RAKE_CLUSTER_RADIUS = 26
 -- Leaf piles live on the Fall Event map, which is mapId 0 in Shared.List.Maps
 local FALL_MAP_ID = 0
@@ -1658,11 +2072,31 @@ local function petServiceRef()
 	return PetService
 end
 
--- every pet id sitting one tier below `tier` that the server would accept
-local function petIdsForTier(data, tier)
-	local ids = {}
-	if not data.inventory.pet then
-		return ids
+-- Craft machine reference behaviour, verified against the live account.
+--
+-- Two things made every craft toggle a no-op:
+--
+-- 1) craft(ids, craftAll, amount) answers "isNotSame" unless EVERY id in the
+--    call refers to the SAME pet descriptor. Verified: passing three different
+--    tier-1 ids returned "isNotSame"; passing one id returned "success". The
+--    old petIdsForTier collected every eligible id in the tier into a single
+--    call, so with more than one pet type in the inventory it always failed.
+--    petIdGroupsForTier now groups ids BY DESCRIPTOR and the caller makes one
+--    call per group. The game's own craft-all does exactly this - see
+--    CraftMachineFrame:invokeCraftAllPets, which walks the inventory and
+--    groups by petUtils.getPetDescriptor.
+--
+-- 2) TiersList is keyed by NUMBER 1..5, not by name. TiersList["golden"] is
+--    nil, so canAffordCraft's lookup silently found no definition and every
+--    shard gate was skipped. Only tier 5 (Rainbow) has a craftPrice at all,
+--    and its currency is rainbowShard.
+--
+-- Group every craftable id under `tier` by pet descriptor.
+-- Returns an array of {desc = ..., ids = {...}}, one entry per distinct pet.
+local function petIdGroupsForTier(data, tier)
+	local groups, order = {}, {}
+	if not data.inventory or not data.inventory.pet then
+		return groups
 	end
 	for id, entry in pairs(data.inventory.pet) do
 		if type(entry) == "table" and (entry.ti or 1) == tier - 1 and (entry.am or 0) >= 5 then
@@ -1670,45 +2104,54 @@ local function petIdsForTier(data, tier)
 				return Util.itemUtils.getItemFromId(data, id)
 			end)
 			local usable = ok and item ~= nil
+			-- the game's own gate: the pet must actually be craftable to the
+			-- target tier (no image at that tier, etc)
 			if usable then
-				-- the game's own filters: can't craft something locked, and
-				-- can't craft to a tier the pet has no image for
-				local okCraft = pcall(function()
+				local okC, canCraft = pcall(function()
 					return Util.petUtils.canCraftToTier(item, tier)
 				end)
-				if not okCraft then
-					usable = false
-				else
-					local got = Util.petUtils.canCraftToTier(item, tier)
-					if got == nil or got == false then
-						usable = false
-					end
-				end
-				if usable then
-					local okLocked = pcall(function()
-						return item:getLocked()
-					end)
-					if okLocked then
-						local lk
-						pcall(function()
-							lk = item:getLocked()
-						end)
-						if lk then
-							usable = false
-						end
-					end
-				end
-				-- favourites are protected by the game's own craft-all path
-				if usable and data.favorites and data.favorites[id] then
-					usable = false
-				end
+				usable = okC and canCraft ~= false and canCraft ~= nil
+			end
+			-- an evolved pet is excluded by CraftMachineFrame:createPetUI
+			if usable then
+				local okE, evo = pcall(function()
+					return item:getEvolution()
+				end)
+				usable = not (okE and evo)
 			end
 			if usable then
-				ids[#ids + 1] = id
+				local okL, lk = pcall(function()
+					return item:getLocked()
+				end)
+				usable = not (okL and lk)
+			end
+			-- favourites are protected by the game's own craft-all path
+			if usable and data.favorites and data.favorites[id] then
+				usable = false
+			end
+			if usable then
+				local okD, desc = pcall(function()
+					return Util.petUtils.getPetDescriptor(item)
+				end)
+				if okD and desc then
+					if not groups[desc] then
+						groups[desc] = {}
+						order[#order + 1] = desc
+					end
+					table.insert(groups[desc], id)
+				end
 			end
 		end
 	end
-	return ids
+	local out = {}
+	for _, desc in ipairs(order) do
+		out[#out + 1] = { desc = desc, ids = groups[desc] }
+	end
+	-- deterministic order so the same pet is worked on first each pass
+	table.sort(out, function(a, b)
+		return a.desc < b.desc
+	end)
+	return out
 end
 
 local TiersList = require(ReplicatedStorage.Shared.List.Pets.Tiers)
@@ -1728,23 +2171,27 @@ local function countCraftable(data, tier)
 end
 
 -- currency gate: Tiers[tier].craftPrice names the currency and per-rarity cost
+-- Shard gate. Only Rainbow (tier 5) has a craftPrice - verified: tiers 1-4
+-- have none. Its shape is {currency = <item name>, rarities = {<rarity> = n}},
+-- so the cheapest possible craft is the lowest rarity cost. Keyed by NUMBER,
+-- which is why the old TiersList["golden"] lookup found nothing.
 local function canAffordCraft(data, tier)
 	local def = TiersList[tier]
-	if not def or type(def) ~= "table" or not def.craftPrice then
+	if not def or type(def) ~= "table" or type(def.craftPrice) ~= "table" then
 		return true
 	end
+	local price = def.craftPrice
 	local have = 0
 	local okCur, cur = pcall(function()
-		return Util.itemUtils.getItemFromName(data, def.craftPrice.currency)
+		return Util.itemUtils.getItemFromName(data, price.currency)
 	end)
 	if okCur and cur then
 		pcall(function()
 			have = cur:getAmount()
 		end)
 	end
-	-- cheapest possible craft is the lowest rarity cost
 	local cheapest = math.huge
-	for _, cost in pairs(def.craftPrice.rarities or {}) do
+	for _, cost in pairs(price.rarities or {}) do
 		if type(cost) == "number" and cost < cheapest then
 			cheapest = cost
 		end
@@ -1769,36 +2216,102 @@ local function craftPetsTier(t, tierKey)
 		return
 	end
 	if not canAffordCraft(data, tier) then
+		-- only tier 5 can ever land here; do not nag on every tick
+		if not t.toldNoShards then
+			t.toldNoShards = true
+			local curName = TiersList[tier] and TiersList[tier].craftPrice
+				and TiersList[tier].craftPrice.currency or "shards"
+			notify("Pet Craft", ("Out of %s - Rainbow craft skipped."):format(tostring(curName)))
+		end
 		return
 	end
-	local ids = petIdsForTier(data, tier)
-	if #ids == 0 then
+	t.toldNoShards = false
+
+	local groups = petIdGroupsForTier(data, tier)
+	if #groups == 0 then
 		return
 	end
 
-	local before = countCraftable(data, tier)
-	local ok, res = pcall(function()
-		return svc:craft(ids, true)
-	end)
-	if ok and res == "success" then
-		local after = countCraftable(data, tier)
-		local made = math.max(0, before - after)
-		t.crafted = (t.crafted or 0) + (made or 0)
-		t.cooldown = os.clock() + 1.5
-		if t.crafted > 0 then
+	-- ONE CALL PER DISTINCT PET, sweeping EVERY group every pass.
+	--
+	-- craftAll = true spends the whole stack rather than leaving a remainder of
+	-- 4, and one call per descriptor is required because the server answers
+	-- "isNotSame" if the ids are not all the same pet (verified).
+	--
+	-- Why it used to crawl: the loop broke out the moment t.cooldown was in the
+	-- future, which was true for every tick after the first craft, so it did at
+	-- most one craft per 0.4s tick and stopped dead at a 40-attempt cap. Now the
+	-- whole sweep runs in one pass with no in-loop cooldown break, and each
+	-- group is measured individually so the progress count is real.
+	local made, attempts, lastRes = 0, 0, nil
+	for _, group in ipairs(groups) do
+		attempts += 1
+		-- a generous ceiling purely as a runaway guard; a full sweep of a large
+		-- account is well under this
+		if attempts > 500 then
+			break
+		end
+		-- fresh data per group: the tier-N-below pool shrinks as we go, and a
+		-- stale snapshot makes countCraftable report phantom progress
+		local fresh = getData() or data
+		local before = countCraftable(fresh, tier)
+		-- count this group's own stack specifically, since the pool total also
+		-- moves when other pets are crafted
+		local ok, res = pcall(function()
+			return svc:craft(group.ids, true, math.huge)
+		end)
+		lastRes = res
+		if ok and res == "success" then
+			local after = countCraftable(getData() or fresh, tier)
+			-- anything consumed beyond this group's own share came from other
+			-- stacks, but every success is still one pet made
+			local dropped = (before - after) or 0
+			made += math.max(dropped > 0 and math.floor(dropped / 5) or 1, 1)
+		elseif ok then
+			-- per-pet rejection: keep going, the next pet may well work. A
+			-- shard shortfall will not improve, so stop on that one.
+			t.lastReject = tostring(res)
+			if res == "notEnoughShards" or res == "notEnoughCurrency" then
+				break
+			end
+		else
+			t.lastReject = tostring(res)
+		end
+	end
+	t.swept = attempts
+	t.lastRes = lastRes
+
+	t.crafted = (t.crafted or 0) + made
+	if made > 0 then
+		-- the whole sweep already ran this pass, so the next one can start as
+		-- soon as the server has caught up. 0.15s keeps it near the server's
+		-- own round-trip without hammering it.
+		t.cooldown = os.clock() + 0.15
+		t.toldRes = false
+		t.toldNoShards = false
+		if notifyEnabled and (t.crafted % 50) < made then
+			local nxt = ({ golden = "toxic", toxic = "galaxy", galaxy = "rainbow" })[tierKey]
 			notify(
 				"Pet Craft",
 				("%s: %s -> %s (%d crafted so far)"):format(
 					tierKey:upper(),
 					(PET_TIER_NAMES[tierKey] or "?"),
-					(PET_TIER_NAMES[({golden = "toxic", toxic = "galaxy", galaxy = "rainbow"})[tierKey]] or "?"),
+					(PET_TIER_NAMES[nxt] or "?"),
 					t.crafted
 				)
 			)
 		end
-	elseif ok and res ~= nil and res ~= "success" then
-		t.cooldown = os.clock() + 4
+	elseif lastRes ~= nil and lastRes ~= "success" then
+		t.cooldown = os.clock() + 2
+		-- surfaced once rather than every pass, so a rejected call is
+		-- diagnosable instead of looking like a silent no-op
+		if notifyEnabled and not t.toldRes then
+			t.toldRes = true
+			notify("Pet Craft", ("Server said %s"):format(tostring(lastRes)))
+		end
 	else
+		-- nothing craftable right now: back off so we are not re-walking the
+		-- whole inventory every 1.5s for no reason
 		t.cooldown = os.clock() + 3
 	end
 end
@@ -1977,6 +2490,152 @@ local function petCraftRunner(t, tierKey)
 		return
 	end
 	craftPetsTier(t, tierKey)
+end
+
+-- ------------------------------------------------------------------
+-- Auto Index (rcu-egg-index.luau)
+--
+-- Kept in its own file because this chunk is one register scope capped at 200
+-- and the feature carries a lot of helpers. Inlined here it tipped the hub over
+-- the limit and nothing loaded at all.
+--
+-- NOTE: it is passed in as SOURCE, not loaded with loadstring, for the same
+-- reason readfile is not used anywhere else in this file - the executor
+-- rejects absolute paths with "Path outside workspace", so a load attempt
+-- would silently fail and the feature would just vanish again. The MCP writes
+-- the source next to the hub and injects it here instead.
+-- ------------------------------------------------------------------
+local AutoIndex = nil
+do
+	local src = rawget(_G, "__RCU_EGG_INDEX_SRC")
+	if type(src) == "string" and src ~= "" then
+		local chunk = loadstring(src)
+		if chunk then
+			local ok, mod = pcall(chunk)
+			if ok and type(mod) == "function" then
+				-- the module is a factory: it takes the game modules it needs
+				-- and returns the ui object
+				local ok2, ui = pcall(mod, {
+					RS = ReplicatedStorage,
+					Knit = Knit,
+					Util = Util,
+					PetsList = require(ReplicatedStorage.Shared.List.Pets.Pets),
+					RaritiesList = require(ReplicatedStorage.Shared.List.Pets.Rarities),
+					EggList = EggList,
+					suffix = suffix,
+					getService = getService,
+				})
+				if ok2 and type(ui) == "table" then
+					AutoIndex = ui
+				else
+					rawset(_G, "__RCU_INDEX_ERROR", tostring(ui))
+				end
+			else
+				rawset(_G, "__RCU_INDEX_ERROR", tostring(mod))
+			end
+		end
+	end
+end
+
+-- Bridge helpers handed to the index feature so it can reuse the hub's own
+-- machinery (teleport, legal interval, currency checks, crafting) instead of
+-- duplicating it and drifting out of sync.
+
+-- Open one batch from `egg`, using exactly the same path the Auto Hatch runner
+-- uses: teleport into range, take the game's open params (which carry the
+-- lucky/global egg id when one is in reach), and fire openEgg at the legal
+-- cadence.
+function AutoIndex.hatchEgg(egg)
+	local data = getData()
+	if not data or not EggController or not EggService or not egg or egg == "" then
+		return false
+	end
+	-- currency gate, same as the Auto Hatch runner: never fire into the void
+	local okAmt, amount = pcall(function()
+		return Util.eggUtils.getAmountFromOpenType(LocalPlayer, data, egg, 2, EggController:getOpenParams())
+	end)
+	if okAmt then
+		local okHas, has = pcall(function()
+			return Util.eggUtils.hasEnoughToOpen(data, egg, amount, EggController:getOpenParams())
+		end)
+		if okHas and not has then
+			return false, "Out of currency for " .. tostring(egg)
+		end
+	end
+
+	-- _currentEgg is only set by the game's proximity scan, and a lucky egg is
+	-- RENAMED to the best egg's name, so a match here does not prove we are at
+	-- the egg we asked for. teleportToEgg re-anchors and waits for the scan, so
+	-- call it whenever the cached name disagrees, and treat failure as "not
+	-- ready" rather than hatching a different egg.
+	if EggController._currentEgg ~= egg then
+		local ok = teleportToEgg({ alive = true }, egg)
+		if not ok then
+			return false, "Could not reach " .. tostring(egg)
+		end
+		if EggController._currentEgg ~= egg then
+			return false, "Out of range of " .. tostring(egg)
+		end
+	end
+
+	local params = (EggController:getOpenParams())
+	pcall(function()
+		EggService.openEgg:Fire(egg, 2, params)
+	end)
+	return true
+end
+
+-- Craft one specific pet by name, if any machine can make it. Used when a
+-- target the user wants is craftable - that never needs luck, so it is always
+-- the better move. Walks the craft tiers from the top down and calls the same
+-- grouped craft path the craft toggles use.
+
+-- Craft one specific pet at `targetTier`, if any machine can make it and we
+-- have the inputs. Used when a target the user wants is craftable - that never
+-- needs luck, so it is always the better move. targetTier is the tier the
+-- index wants, so we consume a stack one tier below it.
+function AutoIndex.craftOne(petName, targetTier)
+	local svc = petServiceRef()
+	if not svc or not petName then
+		return false
+	end
+	local data = getData()
+	if not data or not targetTier or targetTier < 2 then
+		return false
+	end
+	if not canAffordCraft(data, targetTier) then
+		return false
+	end
+	-- find an inventory stack of this pet sitting one tier below the target
+	for id, entry in pairs(data.inventory and data.inventory.pet or {}) do
+		if (entry.ti or 1) == targetTier - 1 then
+			local okName, nm = pcall(function()
+				local item = Util.itemUtils.getItemFromId(data, id)
+				return item and item:getName()
+			end)
+			if okName and nm and tostring(nm):lower() == tostring(petName):lower() then
+				if (entry.am or 0) >= 5 then
+					local okItem, item = pcall(function()
+						return Util.itemUtils.getItemFromId(data, id)
+					end)
+					if okItem and item then
+						local okC, can = pcall(function()
+							return Util.petUtils.canCraftToTier(item, targetTier)
+						end)
+						if okC and can then
+							local ok, res = pcall(function()
+								-- craftAll on this one group: spend the whole stack
+								return svc:craft({ id }, true, math.huge)
+							end)
+							return ok and res == "success"
+						end
+					end
+				end
+				break
+			end
+		end
+	end
+	return false
 end
 
 -- Tree models only get a PrimaryPart once a tree-bearing map is actually
@@ -2828,7 +3487,13 @@ end
 -- rejected and never got through the tree. This walks categories in
 -- dependency order, nodes in index order, and buys every affordable
 -- prerequisite-satisfied node in one pass.
-local function skillMasteryOk(data, req)
+-- These live in ONE table rather than as separate top-level locals on
+-- purpose. Luau caps a chunk at 200 local registers and this file is already
+-- close to it, so every extra top-level local is a chance that one more
+-- addition stops the whole hub compiling.
+local SkillTreeHelpers = {}
+
+function SkillTreeHelpers.masteryOk(data, req)
 	if type(req) ~= "table" or not req.name then
 		return true
 	end
@@ -2841,18 +3506,82 @@ local function skillMasteryOk(data, req)
 	return tier >= (req.tier or 0)
 end
 
--- is node `i` of `catData` unlocked, per the rule above?
-local function skillNodeVisible(owned, catData, i)
-	if i <= 2 then
+-- How many of a currency we hold. This is the whole gem-upgrade bug.
+--
+-- Verified shapes in Shared.List.SkillTree, per tree:
+--   fallEvent          currency = ITEM TABLE   ({nm = "acorns", ...})
+--   dungeonUpgrades    currency = STRING       ("dungeonCoins")
+--   base / eggUpgrades / rewards / boosts
+--                      currency = NIL
+-- The gem-priced trees carry no currency field at all, which is what "costs
+-- gems" means here. The old check was
+--   rawItemAmount(data, node.currency and node.currency.nm)
+-- so for every gem node it read rawItemAmount(data, nil) -> 0 >= 5e+22 -> false
+-- -> the category `break`s on its first node and the whole gem tree is
+-- silently never bought. It also crashed on the string-currency tree, since a
+-- string has no .nm.
+function SkillTreeHelpers.currencyBalance(data, node)
+	local price = node.price or 0
+	local cur = node.currency
+	if cur == nil then
+		-- no currency field = priced in gems, which live on data.gems
+		return data.gems or 0, price, "gems"
+	end
+	if type(cur) == "string" then
+		return rawItemAmount(data, cur), price, cur
+	end
+	if type(cur) == "table" then
+		local nm = cur.nm
+		if type(nm) == "string" then
+			return rawItemAmount(data, nm), price, nm
+		end
+		-- a currency object we cannot name: do not block on it
+		return math.huge, price, "?"
+	end
+	return math.huge, price, "?"
+end
+
+-- Is node at position `i` in `catData` unlocked?
+--
+-- The old rule (i<=2 free, i>=3 needs i-1) was transcribed from
+-- getVisibleHexagons and is wrong for a tree bought in the same pass.
+-- SkillTreeController:onClick shows what actually happens: a successful buy
+-- of index N marks N, N+1 AND N+2 as owned locally, because those nodes
+-- become visible together. So after buying index 1 of auraLuck, indices 2 and
+-- 3 are immediately buyable even though the old rule demanded 1 and 2.
+-- Mirroring that unlock is what makes a whole category drain in one pass
+-- instead of stalling on the third node.
+function SkillTreeHelpers.nodeVisible(owned, catData, i)
+	if i <= 3 then
 		return true
 	end
-	if i == 3 then
-		return owned[(catData._key or "") .. "_1"] == true
+	return owned[(catData._key or "") .. "_" .. (i - 2)] == true
+end
+
+-- record a purchase the way the game does, unlocking the two nodes above it
+function SkillTreeHelpers.markOwned(owned, catData, index)
+	local key = catData._key or ""
+	owned[key .. "_" .. index] = true
+	owned[key .. "_" .. (index + 1)] = true
+	owned[key .. "_" .. (index + 2)] = true
+end
+
+-- Every tree is a candidate, not just the one for the map we are standing on.
+--
+-- The old runner resolved the current map's tree by name and gave up if it was
+-- not found. The map trees are only a few of nine: base, eggUpgrades, rewards
+-- and boosts are account-wide and buyable from anywhere, and those are exactly
+-- the gem ones. "Skill tree not working with gem upgrades" was this line.
+-- Each tree is still gated on its own requiredMastery.
+function SkillTreeHelpers.candidates()
+	local out = {}
+	for k in pairs(SkillTreeList) do
+		if type(SkillTreeList[k]) == "table" and type(SkillTreeList[k].list) == "table" then
+			out[#out + 1] = k
+		end
 	end
-	if i == 4 then
-		return owned[(catData._key or "") .. "_2"] == true
-	end
-	return owned[(catData._key or "") .. "_" .. (i - 1)] == true
+	table.sort(out)
+	return out
 end
 
 local function skillTreeRunner(t)
@@ -2860,73 +3589,77 @@ local function skillTreeRunner(t)
 	if not data or not SkillTreeService then
 		return
 	end
-	local norm = (data.currentMap and data.currentMap.mapName or ""):lower():gsub("[^a-z]", "")
-	local treeKey = nil
-	for k in pairs(SkillTreeList) do
-		if k:lower():gsub("[^a-z]", "") == norm then
-			treeKey = k
-			break
-		end
-	end
-	local tree = treeKey and SkillTreeList[treeKey]
-	if type(tree) ~= "table" or type(tree.list) ~= "table" then
-		return
-	end
-	if not skillMasteryOk(data, tree.requiredMastery) then
-		return
-	end
-	local owned = (data.skillTree and data.skillTree[treeKey]) or {}
-
-	-- build the work list: root categories first, then child categories
-	-- ordered by how deep their parent sits, so a chain like
-	-- acornsBase -> acornsMain -> acornsHigher resolves in one pass.
-	local roots, children = {}, {}
-	local catKeys = {}
-	for k in pairs(tree.list) do
-		catKeys[#catKeys + 1] = k
-	end
-	table.sort(catKeys)
-	for _, k in ipairs(catKeys) do
-		local c = tree.list[k]
-		if type(c) == "table" and type(c.list) == "table" then
-			c._key = k
-			if type(c.childOf) == "table" then
-				children[#children + 1] = { key = k, data = c }
-			else
-				roots[#roots + 1] = { key = k, data = c }
-			end
-		end
-	end
 
 	local bought = 0
-	local function tryCategory(entry)
-		local cat, catData = entry.key, entry.data
-		if not skillMasteryOk(data, catData.requiredMastery) then
-			return
-		end
-		for i = 1, #catData.list do
-			local node = catData.list[i]
-			if type(node) == "table" and node.index then
-				local key = cat .. "_" .. node.index
-				if not owned[key] and skillNodeVisible(owned, catData, i) then
-					if rawItemAmount(data, node.currency and node.currency.nm) >= (node.price or 0) then
-						local ok, res = pcall(function()
-							return SkillTreeService:buySkillTree(treeKey, cat, node.index)
-						end)
-						if ok and res == "success" then
-							owned[key] = true
-							bought += 1
-							if notifyEnabled and bought <= 3 then
-								notify("Skill Tree", "Bought " .. tostring(node.name or key))
-							end
-							-- keep going: the next index may now be unlocked
-						elseif res ~= "success" then
-							-- rejected: do not hammer the same node, the server
-							-- wants a beat between calls
-							return
+	local problems = 0
+
+	for _, treeKey in ipairs(SkillTreeHelpers.candidates()) do
+		local tree = SkillTreeList[treeKey]
+		if type(tree) == "table" and type(tree.list) == "table" then
+			if SkillTreeHelpers.masteryOk(data, tree.requiredMastery) then
+				-- owned is a live reference into data when the tree has an
+				-- entry, and a scratch table when it does not. Either way the
+				-- writes below are local bookkeeping so one pass can chain.
+				local owned = (data.skillTree and data.skillTree[treeKey]) or {}
+
+				-- roots first, then children by depth, so a chain such as
+				-- acornsBase -> acornsMain -> acornsHigher resolves in one pass
+				local roots, children = {}, {}
+				local catKeys = {}
+				for k in pairs(tree.list) do
+					catKeys[#catKeys + 1] = k
+				end
+				table.sort(catKeys)
+				for _, k in ipairs(catKeys) do
+					local c = tree.list[k]
+					if type(c) == "table" and type(c.list) == "table" then
+						c._key = k
+						if type(c.childOf) == "table" then
+							children[#children + 1] = { key = k, data = c }
+						else
+							roots[#roots + 1] = { key = k, data = c }
 						end
-					else
-						-- cannot afford this one; everything after it is either
+					end
+				end
+
+				local function tryCategory(entry)
+					local cat, catData = entry.key, entry.data
+					if not SkillTreeHelpers.masteryOk(data, catData.requiredMastery) then
+						return
+					end
+					for i = 1, #catData.list do
+						local node = catData.list[i]
+						if type(node) == "table" and node.index then
+							local key = cat .. "_" .. node.index
+							if not owned[key] and SkillTreeHelpers.nodeVisible(owned, catData, i) then
+								local have, price = SkillTreeHelpers.currencyBalance(data, node)
+								if have >= price then
+									local ok, res = pcall(function()
+										return SkillTreeService:buySkillTree(treeKey, cat, node.index)
+									end)
+									if ok and res == "success" then
+										SkillTreeHelpers.markOwned(owned, catData, node.index)
+										bought += 1
+										if notifyEnabled and bought <= 3 then
+											notify("Skill Tree", "Bought " .. tostring(node.name or key))
+										end
+										-- keep going: the next index may now be unlocked
+									elseif ok and res ~= "success" then
+										-- rejected: the server wants a beat between
+										-- calls, and this node is unaffordable or
+										-- gated server-side, so stop this category
+										if notifyEnabled and res then
+											problems += 1
+											t.lastReject = tostring(treeKey) .. " " .. key .. " -> " .. tostring(res)
+										end
+										return
+									elseif not ok then
+										problems += 1
+										t.lastReject = tostring(treeKey) .. " " .. key .. " -> " .. tostring(res)
+										return
+									end
+								else
+									-- cannot afford this one; everything after it is either
 						-- locked behind it or more expensive, so this category is
 						-- done for now
 						break
@@ -2937,24 +3670,28 @@ local function skillTreeRunner(t)
 	end
 
 	for _, e in ipairs(roots) do
-		tryCategory(e)
-	end
-	-- resolve child categories, repeating so a chain gets fully walked
-	for _ = 1, 4 do
-		local progressed = false
-		for _, e in ipairs(children) do
-			local pk = e.data.childOf
-			if owned[pk[1] .. "_" .. pk[2]] then
-				tryCategory(e)
-				progressed = true
+					tryCategory(e)
+				end
+				-- resolve child categories, repeating so a chain gets fully walked
+				for _ = 1, 4 do
+					local progressed = false
+					for _, e in ipairs(children) do
+						local pk = e.data.childOf
+						if owned[pk[1] .. "_" .. pk[2]] then
+							tryCategory(e)
+							progressed = true
+						end
+					end
+					if not progressed then
+						break
+					end
+				end
 			end
-		end
-		if not progressed then
-			break
 		end
 	end
 
 	t.lastBought = bought
+	t.lastProblems = problems > 0 and problems or nil
 	if bought > 0 then
 		t.cooldown = os.clock() + 0.5
 	end
@@ -3090,7 +3827,6 @@ end
 -- No env hacking, no render-step unbinding.
 -- ------------------------------------------------------------------
 local FISH_MAP_ID = 30
-local FISH_ROD_NAME = "magicFishingRod"
 local FISH_RECAST_DELAY = 0.12
 -- the game's own "you are here to fish" spot, lifted verbatim from
 -- FishingController's auto-fish bootstrap so we stand exactly where it does
@@ -3287,11 +4023,24 @@ local function fishRunner(t)
 	if not data.isFishingRodEquipped then
 		local okUse = equipRod()
 		if not okUse then
-			t.cooldown = os.clock() + 1
+			-- say WHY instead of retrying silently forever: no rod owned, or the
+			-- server never accepted the equip
+			if not t.toldNoRod then
+				t.toldNoRod = true
+				local id, idx = bestOwnedRodId(data)
+				if not id then
+					notify("Auto Fishing", "No fishing rod owned - buy one first.")
+				else
+					notify("Auto Fishing", "Could not equip your rod (index " .. tostring(idx) .. ").")
+				end
+			end
+			t.cooldown = os.clock() + 2
 			return
 		end
+		t.toldNoRod = false
 		return
 	end
+	t.toldNoRod = false
 
 	-- 3) the fishing world must be loaded before the zone tag exists
 	local zones = CollectionService:GetTagged("fishingZone")
@@ -3555,7 +4304,7 @@ local function section(tab, name, icon)
 	return built
 end
 
-local uiOk2, uiErr2 = xpcall(function()
+LiveCounts.uiOk, LiveCounts.uiErr = xpcall(function()
 local defaultEgg = "Fall 2026"
 if not table.find(eggNames, defaultEgg) then
 	defaultEgg = eggNames[1]
@@ -3630,6 +4379,11 @@ bindPlainToggle(secEgg, "AutoHatchNearest", {
 })
 
 bindToggle(secEgg, { id = "AutoHatch", title = "Auto Hatch", desc = "Teleports to the egg and opens max as fast as the server answers (~46 pets/s with the animation off)", group = "Hatching" }, "hatch", hatchRunner, 0.02)
+bindPlainToggle(secEgg, "AutoHatchLuckyEggs", {
+	Title = "Hatch lucky eggs",
+	Description = "Teleports to a spawned lucky egg and opens it, then goes back to your chosen egg when it expires",
+	Default = true,
+})
 
 secEgg:AddButton({
 	Title = "Teleport to egg",
@@ -3842,6 +4596,216 @@ bindPlainToggle(secAuras, "AuraAutoSecret", {
 
 bindToggle(secAuras, { id = "AutoRollAuras", title = "Auto roll auras", desc = "Rolls the chosen dice as fast as the server allows", group = "Auras" }, "auras", auraRunner, 0.2)
 
+-- ------------------------------------------------------------------
+-- live counts for the dice and orb dropdowns
+--
+-- Both dropdowns bake the owned count into the row label ("auraDice  (12)")
+-- but the label was built once at load, so a stale count sits there until a
+-- reload. Worse, the runners parse the name back out of the label
+-- (diceValueName / the "  (" split), so the count has to stay in the label.
+--
+-- The catch is that SetValues rebuilds the option list, which throws away the
+-- current selection. So the selection is captured first, by BASE NAME (the part
+-- before the "  (" marker), then restored by matching each new label's base
+-- name against what was selected. Anything the user has not picked stays
+-- unpicked, and a selection that no longer exists is simply dropped.
+--
+-- One table so this costs a single register.
+-- ------------------------------------------------------------------
+-- LiveCounts.skinsLine holds the "Tap skins owned" Paragraph, rewritten in place by
+-- tick. Declared on the table so this costs no extra top-level register.
+LiveCounts.skinsLine = nil
+
+-- snapshot which base names are currently selected on a Multi dropdown
+function LiveCounts.capture(dropdown)
+	local ok, v = pcall(function()
+		return dropdown and dropdown.Value
+	end)
+	local sel = {}
+	if ok and type(v) == "table" then
+		for label, on in pairs(v) do
+			if on then
+				-- strip the "  (count)" suffix so a selection survives a count
+				-- change: the same base name is selected before and after
+				if type(label) == "string" then
+					local i = string.find(label, "  (", 1, true)
+					sel[(i and label:sub(1, i - 1)) or label] = true
+				end
+			end
+		end
+	end
+	return sel
+end
+
+-- republish `values` on `dropdown`, keeping the selection by base name
+function LiveCounts.apply(dropdown, values)
+	if type(dropdown) ~= "table" then
+		return false
+	end
+	local sel = LiveCounts.capture(dropdown)
+	local ok = pcall(function()
+		dropdown:SetValues(values)
+	end)
+	if not ok then
+		return false
+	end
+	-- Multi dropdowns store a set; rebuild it from the captured names
+	local restored = {}
+	local matched = 0
+	for _, label in ipairs(values) do
+		local i = string.find(label, "  (", 1, true)
+		local base = (i and label:sub(1, i - 1)) or label
+		if sel[base] then
+			restored[label] = true
+			matched += 1
+		end
+	end
+	pcall(function()
+		dropdown:SetValue(restored)
+	end)
+	return matched > 0
+end
+
+-- build "name  (count)" rows from an inventory section
+local function inventoryCounts(section)
+	local counts = {}
+	if type(section) ~= "table" then
+		return counts
+	end
+	for _, e in pairs(section) do
+		if type(e) == "table" and e.nm then
+			counts[tostring(e.nm)] = e.am or 0
+		end
+	end
+	return counts
+end
+
+-- Refresh both dropdowns if any count moved since last tick. Returns true when
+-- something was actually rewritten, so the caller can skip the work otherwise.
+function LiveCounts.tick(data, last)
+	local d = data or getData()
+	if not d or not d.inventory then
+		return false
+	end
+	last = last or {}
+	local changed = false
+
+	-- aura dice
+	local dice = d.inventory.auraDice
+	if type(dice) == "table" then
+		local rows, sig = {}, {}
+		for _, e in pairs(dice) do
+			if type(e) == "table" and e.nm then
+				local nm = tostring(e.nm)
+				local am = e.am or 0
+				sig[nm] = am
+				rows[#rows + 1] = nm .. "  (" .. suffix(am) .. ")"
+			end
+		end
+		table.sort(rows)
+		if #rows == 0 then
+			rows = { "auraDice  (0)" }
+			sig = { auraDice = 0 }
+		end
+		local moved = last.diceSig == nil
+		if not moved then
+			for nm, am in pairs(sig) do
+				if last.diceSig[nm] ~= am then
+					moved = true
+					break
+				end
+			end
+			for nm in pairs(last.diceSig) do
+				if sig[nm] == nil then
+					moved = true
+					break
+				end
+			end
+		end
+		if moved then
+			last.diceSig = sig
+			if LiveCounts.apply(Options.AuraDice, rows) then
+				changed = true
+			end
+		end
+	end
+
+	-- tap orbs: the row set is every orb the game knows about, so a count of 0
+	-- still shows (that is how you see what you do not own yet)
+	local orbs = d.inventory.tapOrb
+	if type(orbs) == "table" then
+		local counts = inventoryCounts(orbs)
+		local rows, sig = {}, {}
+		local okOrbs, TapOrbsList = pcall(function()
+			return require(ReplicatedStorage.Shared.List.Items.TapOrbs)
+		end)
+		if okOrbs and type(TapOrbsList) == "table" then
+			for orbName in pairs(TapOrbsList) do
+				local nm = tostring(orbName)
+				local am = counts[nm] or 0
+				sig[nm] = am
+				rows[#rows + 1] = nm .. "  (" .. suffix(am) .. ")"
+			end
+			table.sort(rows)
+			local moved = last.orbSig == nil
+			if not moved then
+				for nm, am in pairs(sig) do
+					if last.orbSig[nm] ~= am then
+						moved = true
+						break
+					end
+				end
+			end
+			if moved and #rows > 0 then
+				last.orbSig = sig
+				if LiveCounts.apply(Options.TapOrbSelect, rows) then
+					changed = true
+				end
+			end
+		end
+	end
+
+	-- tap skins owned line
+	if LiveCounts.skinsLine then
+		local sig = {}
+		local names = {}
+		for _, e in pairs(d.inventory.tapSkin or {}) do
+			if type(e) == "table" and e.nm then
+				local nm = tostring(e.nm)
+				sig[nm] = e.am or 0
+				names[#names + 1] = nm
+			end
+		end
+		local moved = last.skinSig == nil
+		if not moved then
+			for nm, am in pairs(sig) do
+				if last.skinSig[nm] ~= am then
+					moved = true
+					break
+				end
+			end
+		end
+		if moved then
+			last.skinSig = sig
+			table.sort(names)
+			local rows = {}
+			for _, nm in ipairs(names) do
+				rows[#rows + 1] = nm .. "  (" .. suffix(sig[nm]) .. ")"
+			end
+			pcall(function()
+				if #rows == 0 then
+					LiveCounts.skinsLine:SetDesc("none owned yet")
+				else
+					LiveCounts.skinsLine:SetDesc(table.concat(rows, ", "))
+				end
+			end)
+			changed = true
+		end
+	end
+
+	return changed
+end
+
 local secTap = section("Machines", "Tap Skins", "hand")
 do
 	local TapOrbsList = require(ReplicatedStorage.Shared.List.Items.TapOrbs)
@@ -3861,7 +4825,9 @@ do
 	table.sort(tapOrbValues)
 
 	-- the skins you actually own, with counts - the aura section has no
-	-- equivalent, so this is the tap-skin answer to "how many do I have"
+	-- equivalent, so this is the tap-skin answer to "how many do I have".
+	-- Kept as a handle so LiveCounts.tick can rewrite it in place; SetDesc is
+	-- the only mutator a Paragraph exposes (SetContent throws in this build).
 	local owned = {}
 	for _, e in pairs(dData and dData.inventory and dData.inventory.tapSkin or {}) do
 		if type(e) == "table" and e.nm then
@@ -3872,7 +4838,7 @@ do
 	if #owned == 0 then
 		owned = { "none owned yet" }
 	end
-	secTap:AddParagraph({
+	LiveCounts.skinsLine = secTap:AddParagraph({
 		Title = "Tap skins owned",
 		Content = table.concat(owned, ", "),
 	})
@@ -3899,18 +4865,26 @@ secPets:AddParagraph({
 	Content = "Each machine consumes 5 copies of a pet to make one at the next tier. Chain them in order for the best result: Normal -> Golden -> Toxic -> Galaxy -> Rainbow.",
 })
 
-bindToggle(secPets, { id = "AutoCraftGolden", title = "Craft Golden pets", desc = "5 Normal -> 1 Golden, spends the whole stack each pass", group = "Pets" }, "craftGolden", function(t)
+-- Live readout. Crafting was working with nothing on screen to prove it, so it
+-- read as broken. This shows the real per-tier counts, how many are left to
+-- spend, what the last server answer was, and the rainbow shard balance.
+LiveCounts.craftStatus = secPets:AddParagraph({
+	Title = "Craft status",
+	Content = "Idle",
+})
+
+bindToggle(secPets, { id = "AutoCraftGolden", title = "Craft Golden pets", desc = "Craft-all on every Normal pet, every pass", group = "Pets" }, "craftGolden", function(t)
 	petCraftRunner(t, "golden")
-end, 1.5)
-bindToggle(secPets, { id = "AutoCraftToxic", title = "Craft Toxic pets", desc = "5 Golden -> 1 Toxic", group = "Pets" }, "craftToxic", function(t)
+end, 0.2)
+bindToggle(secPets, { id = "AutoCraftToxic", title = "Craft Toxic pets", desc = "Craft-all on every Golden pet, every pass", group = "Pets" }, "craftToxic", function(t)
 	petCraftRunner(t, "toxic")
-end, 1.5)
-bindToggle(secPets, { id = "AutoCraftGalaxy", title = "Craft Galaxy pets", desc = "5 Toxic -> 1 Galaxy", group = "Pets" }, "craftGalaxy", function(t)
+end, 0.2)
+bindToggle(secPets, { id = "AutoCraftGalaxy", title = "Craft Galaxy pets", desc = "Craft-all on every Toxic pet, every pass", group = "Pets" }, "craftGalaxy", function(t)
 	petCraftRunner(t, "galaxy")
-end, 1.5)
-bindToggle(secPets, { id = "AutoCraftRainbow", title = "Craft Rainbow pets", desc = "5 Galaxy -> 1 Rainbow", group = "Pets" }, "craftRainbow", function(t)
+end, 0.2)
+bindToggle(secPets, { id = "AutoCraftRainbow", title = "Craft Rainbow pets", desc = "Craft-all on every Galaxy pet. Costs rainbow shards", group = "Pets" }, "craftRainbow", function(t)
 	petCraftRunner(t, "rainbow")
-end, 1.5)
+end, 0.2)
 
 bindToggle(secPets, { id = "AutoEquipBestPets", title = "Auto equip best pets", desc = "Re-equips whenever a better pet shows up, using the game's own multiplier sort", group = "Pets" }, "equipBest", equipBestRunner, 1)
 
@@ -3930,6 +4904,46 @@ bindToggle(secMisc, { id = "AutoFarm", title = "Auto buy / upgrade farms", desc 
 bindToggle(secMisc, { id = "AutoOrbs", title = "Auto collect orbs", desc = "Picks up every orb on the ground instantly", group = "Misc" }, "orbs", orbRunner, 1.5)
 bindToggle(secMisc, { id = "AutoCircus", title = "Auto circus minigame", desc = "Enables the game's autoplay for the circus minigame", group = "Misc" }, "circus", circusRunner, 2)
 bindToggle(secMisc, { id = "AutoSkillTree", title = "Auto buy skill tree", desc = "Buys every affordable skill on the current map's tree", group = "Misc" }, "skillTree", skillTreeRunner, 0.5)
+
+-- ==================================================================
+-- Auto Index
+--
+-- Its own section on the Eggs tab, next to hatching, since it is driven by
+-- hatching. The rarity/variant dropdowns live here too.
+-- ==================================================================
+do
+	local secIndex = section("Eggs", "Auto Index", "list-checks")
+	if AutoIndex then
+		-- capture the real error rather than a bare "build failed": this pcall
+		-- used to swallow the message, which is why a build that never ran
+		-- looked like a working feature with dead toggles
+		local okBuild, buildErr = pcall(function()
+			AutoIndex.build(secIndex, Options, {
+				getData = getData,
+				notify = notify,
+				hatchEgg = AutoIndex.hatchEgg,
+				craftOne = AutoIndex.craftOne,
+				bindToggle = bindToggle,
+			})
+		end)
+		if not okBuild then
+			rawset(_G, "__RCU_INDEX_ERROR", tostring(buildErr))
+			pcall(function()
+				secIndex:AddParagraph({
+					Title = "Auto Index",
+					Content = "Could not build: " .. tostring(buildErr):sub(1, 160),
+				})
+			end)
+		end
+	else
+		pcall(function()
+			secIndex:AddParagraph({
+				Title = "Auto Index",
+				Content = "Module not loaded (see __RCU_EGG_INDEX_SRC).",
+			})
+		end)
+	end
+end
 
 -- ==================================================================
 -- Settings: auto save
@@ -4018,7 +5032,9 @@ end
 -- Settings
 -- ==================================================================
 local secGeneral = section("Settings", "General", "settings")
-local notifyToggle = bindPlainToggle(secGeneral, "ShowNotifications", {
+-- not captured in a local: this chunk is one register scope capped at 200 and
+-- the toggle's side effect (setting notifyEnabled) is all that is needed.
+bindPlainToggle(secGeneral, "ShowNotifications", {
 	Title = "Show notifications",
 	Description = "Off = the hub never pops the bottom-right toasts",
 	Default = false,
@@ -4136,23 +5152,52 @@ local function installHatchAnimationSkip()
 	SKIP_HATCH_ANIM = true
 end
 
--- With the animation gone nothing paces the hatch any more, so the loop can
--- go as fast as the server actually answers instead of the animation's fixed
--- 4.11/speed cycle. Measured on this account by firing openEgg at a fixed
--- interval for 6s each and counting pets that landed (23 pets per batch
--- hatch of "Basic"):
---   1.00s -> 1.00 hatches/s ->  23.1 pets/s
---   0.50s -> 1.32 hatches/s ->  30.4 pets/s
---   0.25s -> 1.49 hatches/s ->  34.2 pets/s
---   0.12s -> 1.67 hatches/s ->  38.4 pets/s
---   0.05s -> 2.01 hatches/s ->  46.3 pets/s
--- Past ~0.05s the curve is flat, so that is the server's own ceiling and
--- going tighter only burns calls it ignores.
-local FAST_HATCH_INTERVAL = 0.05
+-- Hatch cadence. The interval is the game's own cycle time, 4.11 / hatchSpeed
+-- (EggController's autoHatch loop, docId 114 line 683), and that is as fast as
+-- a client may open eggs.
+--
+-- This is deliberately NOT faster than the server's own rate. An earlier
+-- version pinned a flat 0.05s and measured "46 pets/s" against the old
+-- Basic egg; that number only exists because it fires ~9x faster than the
+-- server's cooldown and the excess calls are simply dropped after costing
+-- bandwidth and risking a disconnect. Removing the reveal animation is the
+-- legitimate win: it stops the game gating input on isHatching() and stops
+-- ~46 pet models per second spawning, but it does not buy a rate the server
+-- will not honour.
+--
+-- Note the speed is read through Values.hatchSpeed(player, data), NOT the raw
+-- data.upgrades.hatchSpeed counter. On this account the counter reads 17 while
+-- Values.hatchSpeed returns 8.83 - the counter is a purchase index and the
+-- upgrade list has diminishing returns, so using the raw number as the
+-- multiplier understates the real cycle time and fires too slowly.
+local HATCH_CYCLE = 4.11
+
+-- One table rather than three locals, for the same register reason.
+local Hatch = {}
+
+function Hatch.speed()
+	local data = getData()
+	if not data then
+		return 1
+	end
+	local ok, v = pcall(function()
+		return Values.hatchSpeed(LocalPlayer, data)
+	end)
+	if ok and type(v) == "number" and v > 0 then
+		return v
+	end
+	return 1
+end
+
+function Hatch.interval()
+	local base = HATCH_CYCLE / Hatch.speed()
+	-- a floor so a transient bad read cannot turn into a tight loop
+	return math.max(base, 0.05)
+end
 
 applyHatchInterval = function(t)
-	local base = 4.11 / ((t.hatchSpeed or 1))
-	t.cooldown = os.clock() + (SKIP_HATCH_ANIM and FAST_HATCH_INTERVAL or base)
+	t.cooldown = os.clock() + Hatch.interval()
+	t.hatchSpeed = Hatch.speed()
 end
 
 bindPlainToggle(secGeneral, "SkipHatchAnimation", {
@@ -4179,7 +5224,7 @@ secGeneral:AddButton({
 		if t then
 			applyHatchInterval(t)
 		end
-		notify("Hatching", "Hatch interval: " .. tostring(SKIP_HATCH_ANIM and FAST_HATCH_INTERVAL or 4.11) .. "s")
+		notify("Hatching", ("Hatch interval: %.2fs (x%.2f speed)"):format(Hatch.interval(), Hatch.speed()))
 	end,
 })
 
@@ -4213,205 +5258,12 @@ secGeneral:AddButton({
 	end,
 })
 
--- ------------------------------------------------------------------
--- more themes
---
--- Fluent keeps its themes in a private table reachable only through
--- Creator.GetThemeProperty's first upvalue, and Fluent:SetTheme silently
--- no-ops on a name it does not know. So a new theme means registering the
--- table there first, then SetTheme works by name. Verified: cloning Dark,
--- renaming it, pushing it into Themes + Themes.Names, then SetTheme
--- applies it and Fluent.Theme reports the new name.
---
--- Each theme is generated from a base so every key Fluent expects is
--- present - a partial table leaves elements unpainted.
--- ------------------------------------------------------------------
-local EXTRA_THEMES = {
-	{
-		name = "Ember",
-		accent = Color3.fromRGB(255, 122, 46),
-		element = Color3.fromRGB(255, 154, 92),
-		tab = Color3.fromRGB(214, 106, 52),
-		acrylicMain = Color3.fromRGB(40, 30, 28),
-		acrylicBorder = Color3.fromRGB(122, 74, 55),
-		dialog = Color3.fromRGB(120, 58, 36),
-		dropdownHolder = Color3.fromRGB(120, 58, 36),
-	},
-	{
-		name = "Toxic",
-		accent = Color3.fromRGB(154, 240, 62),
-		element = Color3.fromRGB(178, 245, 106),
-		tab = Color3.fromRGB(120, 190, 60),
-		acrylicMain = Color3.fromRGB(28, 36, 26),
-		acrylicBorder = Color3.fromRGB(90, 122, 60),
-		dialog = Color3.fromRGB(62, 110, 40),
-		dropdownHolder = Color3.fromRGB(62, 110, 40),
-	},
-	{
-		name = "Bloodmoon",
-		accent = Color3.fromRGB(226, 48, 48),
-		element = Color3.fromRGB(214, 92, 92),
-		tab = Color3.fromRGB(180, 48, 48),
-		acrylicMain = Color3.fromRGB(34, 22, 24),
-		acrylicBorder = Color3.fromRGB(110, 55, 55),
-		dialog = Color3.fromRGB(105, 34, 34),
-		dropdownHolder = Color3.fromRGB(105, 34, 34),
-	},
-	{
-		name = "Ice",
-		accent = Color3.fromRGB(150, 220, 255),
-		element = Color3.fromRGB(186, 232, 255),
-		tab = Color3.fromRGB(120, 180, 220),
-		acrylicMain = Color3.fromRGB(26, 32, 40),
-		acrylicBorder = Color3.fromRGB(70, 95, 118),
-		dialog = Color3.fromRGB(46, 78, 106),
-		dropdownHolder = Color3.fromRGB(46, 78, 106),
-	},
-	{
-		name = "Gold",
-		accent = Color3.fromRGB(255, 200, 60),
-		element = Color3.fromRGB(255, 219, 120),
-		tab = Color3.fromRGB(210, 165, 55),
-		acrylicMain = Color3.fromRGB(38, 34, 24),
-		acrylicBorder = Color3.fromRGB(126, 105, 55),
-		dialog = Color3.fromRGB(115, 90, 38),
-		dropdownHolder = Color3.fromRGB(115, 90, 38),
-	},
-	{
-		name = "Neon",
-		accent = Color3.fromRGB(255, 60, 220),
-		element = Color3.fromRGB(240, 130, 235),
-		tab = Color3.fromRGB(200, 60, 180),
-		acrylicMain = Color3.fromRGB(30, 22, 34),
-		acrylicBorder = Color3.fromRGB(105, 60, 110),
-		dialog = Color3.fromRGB(96, 38, 100),
-		dropdownHolder = Color3.fromRGB(96, 38, 100),
-	},
-	{
-		name = "Void",
-		accent = Color3.fromRGB(140, 120, 255),
-		element = Color3.fromRGB(170, 155, 250),
-		tab = Color3.fromRGB(110, 95, 210),
-		acrylicMain = Color3.fromRGB(22, 20, 32),
-		acrylicBorder = Color3.fromRGB(78, 70, 118),
-		dialog = Color3.fromRGB(58, 50, 100),
-		dropdownHolder = Color3.fromRGB(58, 50, 100),
-	},
-	{
-		name = "Mint",
-		accent = Color3.fromRGB(80, 230, 190),
-		element = Color3.fromRGB(130, 240, 214),
-		tab = Color3.fromRGB(70, 180, 155),
-		acrylicMain = Color3.fromRGB(24, 34, 32),
-		acrylicBorder = Color3.fromRGB(70, 110, 100),
-		dialog = Color3.fromRGB(38, 92, 82),
-		dropdownHolder = Color3.fromRGB(38, 92, 82),
-	},
-}
-
--- Pull Fluent's internal theme registry out of Creator, which is the second
--- upvalue of Fluent.SetTheme; GetThemeProperty's first upvalue is the table.
-local function fluentThemes()
-	local ok, creator = pcall(function()
-		return debug.getupvalues(Fluent.SetTheme)[2]
-	end)
-	if not ok or type(creator) ~= "table" then
-		return nil
-	end
-	local ok2, props = pcall(function()
-		return debug.getupvalues(creator.GetThemeProperty)[1]
-	end)
-	if not ok2 or type(props) ~= "table" or type(props.Names) ~= "table" then
-		return nil
-	end
-	return props
-end
-
-local function registerExtraThemes()
-	local props = fluentThemes()
-	if not props or type(props.Dark) ~= "table" then
-		return {}
-	end
-	local names = {}
-	for _, spec in ipairs(EXTRA_THEMES) do
-		if type(props[spec.name]) == "table" then
-			-- already registered by an earlier run
-		else
-			local t = {}
-			-- copy every key the base has, then override the coloured ones
-			for k, v in pairs(props.Dark) do
-				t[k] = v
-			end
-			t.Name = spec.name
-			t.Accent = spec.accent
-			t.Element = spec.element
-			t.Hover = spec.element
-			t.Input = spec.element
-			t.Keybind = spec.element
-			t.SliderRail = spec.element
-			t.ToggleSlider = spec.element
-			t.DropdownOption = spec.element
-			t.Tab = spec.tab
-			t.AcrylicMain = spec.acrylicMain
-			t.AcrylicBorder = spec.acrylicBorder
-			t.Dialog = spec.dialog
-			t.DialogButton = spec.dialog
-			t.DropdownHolder = spec.dropdownHolder
-			-- keep the gradients tinted to the accent, like the stock themes do
-			pcall(function()
-				t.AcrylicGradient = ColorSequence.new({
-					ColorSequenceKeypoint.new(0, spec.accent),
-					ColorSequenceKeypoint.new(1, spec.acrylicMain),
-				})
-			end)
-			props[spec.name] = t
-			props.Names[#props.Names + 1] = spec.name
-		end
-		names[#names + 1] = spec.name
-	end
-	return names
-end
-
-local EXTRA_THEME_NAMES = registerExtraThemes()
-do
-	local values = {}
-	for _, v in ipairs(Fluent.Themes) do
-		if type(v) == "string" then
-			values[#values + 1] = v
-		end
-	end
-	for _, n in ipairs(EXTRA_THEME_NAMES) do
-		local already = false
-		for _, v in ipairs(values) do
-			if v == n then
-				already = true
-				break
-			end
-		end
-		if not already then
-			values[#values + 1] = n
-		end
-	end
-	table.sort(values)
-	if #values > 0 then
-		local d = secGeneral:AddDropdown("ThemePick", {
-			Title = "Theme",
-			Description = "Includes extra themes registered on top of Fluent's own",
-			Default = values[1],
-			Values = values,
-			Callback = function(choice)
-				if type(choice) == "string" and choice ~= Fluent.Theme then
-					pcall(function()
-						Fluent:SetTheme(choice)
-					end)
-				end
-			end,
-		})
-		pcall(function()
-			Options.ThemePick = d
-		end)
-	end
-end
+-- Themes go in their own section so they are easy to find, and a failure
+-- here must not take the rest of Settings with it.
+pcall(function()
+	local secTheme = section("Settings", "Themes", "palette")
+	Themes_build(secTheme, Options)
+end)
 
 local secSafety = section("Settings", "Safety", "shield")
 bindToggle(secSafety, { id = "AntiAfk", title = "Anti-AFK", desc = "Wiggles your character every ~25s when idle so you never get kicked", group = "Safety" }, "afk", antiAfkRunner, 5)
@@ -4446,7 +5298,10 @@ end
 -- status ticker
 -- ------------------------------------------------------------------
 coroutine.wrap(function()
-		local stage = "start"
+	local stage = "start"
+	-- last-seen counts for the dice / orb / skin dropdowns, so tick only
+	-- rewrites a dropdown when a number actually moved
+	local liveCountState = {}
 		pcall(function()
 			stage = "egg"
 			stage = "rebirth"
@@ -4464,17 +5319,17 @@ coroutine.wrap(function()
 			end
 			stage = "egg"
 			local egg = eggValueName(Options.EggSelect and Options.EggSelect.Value or "?")
-			local okSpeed, speed = pcall(function()
-				return data.upgrades and data.upgrades.hatchSpeed or 1
-			end)
-			local cycle = okSpeed and speed and speed > 0 and string.format("%.2fs", 4.11 / speed) or "?"
+			-- read the real speed through Values, not the raw upgrade counter
+			local speed = Hatch.speed()
+			local interval = Hatch.interval()
 			eggStatus:SetDesc(
 				string.format(
-					"Egg: %s | in range: %s | hatching: %s | cycle: %s | anim off: %s",
+					"Egg: %s | in range: %s | hatching: %s | cycle: %.2fs (x%.2f) | anim off: %s",
 					tostring(egg),
 					tostring(EggController and EggController._currentEgg == egg),
 					tostring(HatchingController and HatchingController:isHatching()),
-					SKIP_HATCH_ANIM and string.format("%.2fs", FAST_HATCH_INTERVAL) or cycle,
+					interval,
+					speed,
 					tostring(SKIP_HATCH_ANIM)
 				)
 			)
@@ -4582,6 +5437,64 @@ coroutine.wrap(function()
 			)
 
 			stage = "machines"
+			-- craft readout: proves the machine is doing something, and shows
+			-- the shard balance so Rainbow cannot drain unnoticed
+			pcall(function()
+				if LiveCounts.craftStatus then
+					local tiers, parts = {}, {}
+					local function tc(n)
+						local s = 0
+						for _, e in pairs(data.inventory.pet or {}) do
+							if (e.ti or 1) == n then
+								s = s + (e.am or 0)
+							end
+						end
+						return s
+					end
+					for _, n in ipairs({ 1, 2, 3, 4, 5 }) do
+						tiers[n] = tc(n)
+					end
+					local pend = {}
+					for _, k in ipairs({ "craftGolden", "craftToxic", "craftGalaxy", "craftRainbow" }) do
+						local tt = Tasks[k]
+						local key = ({ craftGolden = 2, craftToxic = 3, craftGalaxy = 4, craftRainbow = 5 })[k]
+						if tt then
+							local g = petIdGroupsForTier(data, key)
+							local ready = 0
+							for _, grp in ipairs(g) do
+								ready += 1
+							end
+							pend[#pend + 1] = ("%s:%d pets/%d stacks"):format(
+								(({ craftGolden = "G", craftToxic = "T", craftGalaxy = "X", craftRainbow = "R" })[k]),
+								tiers[key],
+								ready
+							)
+							if tt.lastReject then
+								pend[#pend + 1] = ("last=%s"):format(tostring(tt.lastReject))
+							elseif tt.toldNoShards then
+								pend[#pend + 1] = "out of shards"
+							end
+						end
+					end
+					local shards = 0
+					pcall(function()
+						shards = itemAmount(data, "rainbowShard")
+					end)
+					parts[#parts + 1] = ("N%s G%s T%s X%s R%s"):format(
+						suffix(tiers[1]), suffix(tiers[2]), suffix(tiers[3]), suffix(tiers[4]), suffix(tiers[5]))
+					if #pend > 0 then
+						parts[#pend + 1] = table.concat(pend, " ")
+					end
+					parts[#parts + 1] = ("rainbow shards: %s"):format(suffix(shards))
+					LiveCounts.craftStatus:SetDesc(table.concat(parts, " | "))
+				end
+			end)
+			-- refresh the dice / orb / tap-skin counts. Every 1s with the rest
+			-- of the ticker: fast enough that a roll's cost shows up as it
+			-- happens, cheap enough that SetValues is not called constantly.
+			pcall(function()
+				LiveCounts.tick(data, liveCountState)
+			end)
 			machineStatus:SetDesc(
 				string.format(
 					"Gems: %s | farms: %s | aura dice: %s | auras: %s",
@@ -4615,7 +5528,7 @@ end)()
 -- ------------------------------------------------------------------
 -- Surface a failed UI build even though print/warn are silenced, so a broken
 -- tab is diagnosable instead of silently rendering empty.
-rawset(_G, "__RCU_UI_ERROR", uiOk2 and nil or tostring(uiErr2))
+rawset(_G, "__RCU_UI_ERROR", LiveCounts.uiOk and nil or tostring(LiveCounts.uiErr))
 
 local function teardown()
 	if stopped then
@@ -4707,3 +5620,6257 @@ task.spawn(function()
 	end)
 end)
 end, debug.traceback)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
