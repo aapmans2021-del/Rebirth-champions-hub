@@ -1,4 +1,4 @@
-=
+
 local stopped = false
 
 local _realPrint, _realWarn = print, warn
