@@ -1,4 +1,4 @@
-
+=
 local stopped = false
 
 local _realPrint, _realWarn = print, warn
@@ -3884,17 +3884,29 @@ local function currentBayName()
 	return data and data.currentFishingWorld or "fishingBay"
 end
 
--- the loaded bay model, if any
-local function fishingWorldModel()
-	local ok, m = pcall(function()
-		return CollectionService:GetTagged("fishingWorld")[1]
-	end)
-	if ok then
-		return m
-	end
-	return nil
-end
-
+-- Stand on the dock EDGE: offset from the water toward the player's current
+-- side by a couple of studs, then drop onto whatever floor is actually there
+-- via groundStand, so we never end up floating over the water or under it.
+-- Where to stand to fish.
+--
+-- This used to depend on the "fishingZone" CollectionService tag, and that is
+-- why Auto Fishing never worked with ANY rod:
+--
+--   * FishingController only READS that tag (getRay -> HasTag("fishingZone") in
+--     its hover/input handlers). Nothing in the game ever applies it.
+--   * Verified on Assets.FishingBays.FishingBay: the folder and its 358
+--     descendants carry only Roblox's own "_BrushtoolBrushed" tags - zero
+--     "fishingZone". The live clone in Skylands is the same.
+--   * So the old runner sat in its `#zones == 0` branch forever, reload call
+--     after reload, and never once reached startFishing. It looked like a rod
+--     problem because the equip step came first and also had its own bug.
+--
+-- The dock is real geometry, so find it that way: the fishing spot the game's
+-- own controller uses is known-good, and the deck under it is the widest flat
+-- collidable part nearby. No tags required.
+local fishParams = RaycastParams.new()
+fishParams.FilterType = Enum.RaycastFilterType.Exclude
+fishParams.IgnoreWater = false
 -- pick the cast target: the fishingZone part nearest the player, else the
 -- first one. Returns its position.
 local function bestFishingZone(hrp)
@@ -3923,9 +3935,6 @@ local function bestFishingZone(hrp)
 	return best, nil
 end
 
--- Stand on the dock EDGE: offset from the water toward the player's current
--- side by a couple of studs, then drop onto whatever floor is actually there
--- via groundStand, so we never end up floating over the water or under it.
 -- A tight downward probe just above the water surface. The generic
 -- groundStand() starts its raycast 300 studs up, which over the fishing bay
 -- hits the Skylands terrain far above the dock and drops us on a rooftop
@@ -3945,15 +3954,9 @@ local function dockFloor(x, z, waterY, hrp)
 	return nil
 end
 
--- Pin FishingController's cast-origin upvalue to `pos`.
---
--- cancelIfTooFarAway() reads that upvalue every frame and calls stopFishing()
--- once the HRP is more than 15 studs from it. The game only ever sets it from
--- the mouse-click path (u131 = v3.Position in onClick), which an automated
--- run never takes, so it stays at (0,0,0) and cancels the cast immediately.
--- Both the function env upvalue and the module-scope copy are set when
--- reachable; this returns true if at least one took.
-
+-- Stand on the dock EDGE: offset from the water toward the player's current
+-- side by a couple of studs, then drop onto whatever floor is actually there
+-- via groundStand, so we never end up floating over the water or under it.
 local function fishStandSpot(hrp)
 	local _, water = bestFishingZone(hrp)
 	if not water then
@@ -4006,20 +4009,30 @@ local function fishRunner(t)
 		return
 	end
 
-	-- 1) get on the fishing map
-	local okMap, mapOk = pcall(function()
+	-- 1) get on the fishing map (map 30 / Skylands).
+	--
+	-- This checks MapController._currentMapId, the CLIENT value, exactly as the
+	-- original did, and that is deliberate. I briefly swapped it for the server's
+	-- data.currentMap.mapId on the theory the client field was stale - it is not.
+	-- data.currentMap.mapId stays at 0 while you are genuinely standing in
+	-- Skylands (character at -5027,-97,-3252, which is map 30's cframe exactly),
+	-- so the server-side check blocked fishing on a character who was in the
+	-- right place. The client field tracks where you actually are; keep it.
+	--
+	-- There is no travel here: the server owns the map and can refuse, and
+	-- re-asking just loops. Get to Skylands yourself and this picks up there.
+	local okMap, onMap = pcall(function()
 		return MapController._currentMapId == FISH_MAP_ID
 	end)
-	if okMap and not mapOk then
-		pcall(function()
-			MapController:setCurrentMap(FISH_MAP_ID)
-		end)
-		clearFishConns()
-		t.fishReady = nil
+	if okMap and not onMap then
+		if not t.toldWrongMap then
+			t.toldWrongMap = true
+			notify("Auto Fishing", "Teleport to Skylands first - the fishing bay is there.")
+		end
+		t.cooldown = os.clock() + 2
 		return
 	end
-
-	-- 2) equip the rod, putting away whatever tool is currently out
+	t.toldWrongMap = false
 	if not data.isFishingRodEquipped then
 		local okUse = equipRod()
 		if not okUse then
@@ -5437,6 +5450,41 @@ coroutine.wrap(function()
 			)
 
 			stage = "machines"
+			-- Re-assert the window's parent every tick.
+			--
+			-- Something in the game detaches Fluent's ScreenGui after load, and a
+			-- parentless ScreenGui renders nothing while every toggle keeps
+			-- working - which is exactly what "the script is not executing"
+			-- looked like, twice. Re-asserting it here means the window comes
+			-- back within a second instead of needing a reload, and the fix
+			-- survives whatever detaches it.
+			pcall(function()
+				-- go through getgenv rather than the local Window: this runs from
+				-- the status ticker, and reaching the window that way has proven
+				-- reliable. Unconditional, because a parentless ScreenGui renders
+				-- nothing at all while every toggle keeps working - which is
+				-- exactly what "the script is not executing" looked like, twice.
+				local fl = getgenv and getgenv().Fluent
+				local r = fl and fl.Window and fl.Window.Root
+				local g = r and r.Parent
+				if g and g:IsA("ScreenGui") then
+					if g.Parent == nil then
+						g.Parent = game:GetService("CoreGui")
+					end
+					pcall(function()
+						g.DisplayOrder = 1000
+					end)
+					pcall(function()
+						g.ResetOnSpawn = false
+					end)
+					pcall(function()
+						g.IgnoreGuiInset = true
+					end)
+					pcall(function()
+						r.ZIndex = 1000
+					end)
+				end
+			end)
 			-- craft readout: proves the machine is doing something, and shows
 			-- the shard balance so Rainbow cannot drain unnoticed
 			pcall(function()
@@ -5590,6 +5638,46 @@ task.spawn(function()
 end)
 
 Window:SelectTab(1)
+
+-- Make sure the window actually renders.
+--
+-- Observed on this account: Fluent created its ScreenGui but left it with a NIL
+-- parent, so the whole hub existed, every toggle worked and every task ran -
+-- and nothing was visible on screen at all. A parentless ScreenGui never
+-- renders, which is why "the script is not executing" looked identical to
+-- "the script is broken". Its ZIndex was also 1, below the game's own UI.
+--
+-- CoreGui is the right parent here: it always renders, survives respawns, and
+-- draws above the PlayerGui the game uses for its HUD and menus. Repair this on
+-- every load so it cannot regress.
+pcall(function()
+	local root = Window.Root
+	local gui = root and root.Parent
+	-- A ScreenGui with a nil parent never renders at all. Observed twice on
+	-- this account: the hub was fully alive (every toggle worked, tasks
+	-- running, no errors) and completely invisible, which looks exactly like
+	-- the script not executing. Fluent hands the ScreenGui over and something
+	-- later detaches it, so this is deliberately UNCONDITIONAL - guarding on
+	-- "parent == nil" was skipping the fix on load and the window vanished
+	-- again on the next reload.
+	if gui and gui:IsA("ScreenGui") then
+		gui.Parent = game:GetService("CoreGui")
+		pcall(function()
+			gui.ResetOnSpawn = false
+		end)
+		pcall(function()
+			gui.IgnoreGuiInset = true
+		end)
+		pcall(function()
+			gui.DisplayOrder = 1000
+		end)
+	end
+	if root then
+		pcall(function()
+			root.ZIndex = 1000
+		end)
+	end
+end)
 
 notify("Rebirth Champions", "Hub loaded. Right Shift minimizes the window.")
 
